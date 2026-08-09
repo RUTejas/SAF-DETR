@@ -1,0 +1,3 @@
+# This file keeps the data/ directory tracked by git.
+# Dataset files (videos, images, annotations) are excluded via .gitignore.
+# Download datasets manually — see documentation/04_DATASETS.md for instructions.

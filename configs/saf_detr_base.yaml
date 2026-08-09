@@ -1,0 +1,94 @@
+# SAF-DETR Training Configuration
+# Surveillance Adaptive Feature-Enhanced Detection Transformer
+# =============================================================
+
+# ──────────────────────────────────────────────────────────────
+# Model Architecture
+# ──────────────────────────────────────────────────────────────
+model:
+  num_classes: 1                  # Person class only (background is implicit)
+  hidden_dim: 256                 # Transformer hidden dimension
+  num_queries: 300                # Number of object queries
+  num_encoder_layers: 1
+  num_decoder_layers: 6
+  dim_feedforward: 1024
+  dropout: 0.0
+  num_heads: 8
+  pretrained_backbone: true
+
+  # Module toggles
+  use_adaptive_intelligence: true
+  use_feature_enhancement: true
+  use_temporal_memory: true
+  use_novel_pipeline: true
+
+# ──────────────────────────────────────────────────────────────
+# Training
+# ──────────────────────────────────────────────────────────────
+training:
+  # Optimiser
+  optimizer: AdamW
+  lr: 1.0e-4
+  lr_backbone: 1.0e-5
+  weight_decay: 1.0e-4
+  gradient_clip: 0.1
+
+  # Schedule
+  lr_drop: 40                     # Epoch to decay LR by 10x
+  num_epochs: 100
+
+  # Data loading
+  batch_size: 8                   # Suitable for RTX 4070 (12 GB)
+  num_workers: 4
+  pin_memory: true
+
+  # Precision & efficiency
+  mixed_precision: true
+  ema: true
+  ema_decay: 0.9999
+
+  # Logging
+  log_interval: 50                # Steps between log entries
+  save_interval: 10               # Epochs between periodic checkpoints
+  use_wandb: false
+  wandb_project: SAF-DETR
+
+  # Paths
+  checkpoint_dir: checkpoints/saf_detr
+  data_root: data
+  train_annotation: data/train/annotations.json
+  val_annotation: data/val/annotations.json
+
+# ──────────────────────────────────────────────────────────────
+# Loss Weights (Behaviour-Aware Composite Loss)
+# ──────────────────────────────────────────────────────────────
+loss:
+  lambda_det: 1.0
+  lambda_track: 0.5
+  lambda_inter: 0.3
+  lambda_temp: 0.2
+
+  # Detection sub-loss weights
+  lambda_cls: 1.0
+  lambda_bbox: 5.0
+  lambda_giou: 2.0
+
+# ──────────────────────────────────────────────────────────────
+# Data Augmentation
+# ──────────────────────────────────────────────────────────────
+augmentation:
+  img_size: 640
+  color_jitter: true
+  horizontal_flip: true
+  random_crop: true
+  mosaic: false                   # Enable for larger datasets
+  mixup: false
+
+# ──────────────────────────────────────────────────────────────
+# Evaluation
+# ──────────────────────────────────────────────────────────────
+evaluation:
+  iou_threshold: 0.5
+  confidence_threshold: 0.5
+  nms_threshold: 0.7             # Not used (NMS-free decoder)
+  max_detections: 100

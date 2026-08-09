@@ -1,0 +1,19 @@
+# Deployment-specific requirements for SAF-DETR web application
+# Install with: pip install -r deployment/requirements.txt
+
+# Core dependencies
+torch>=2.0.0
+torchvision>=0.15.0
+numpy>=1.24.0
+opencv-python>=4.8.0
+Pillow>=10.0.0
+timm>=0.9.0
+
+# Web Application
+streamlit>=1.28.0
+streamlit-webrtc>=0.47.0
+
+# REST API
+fastapi>=0.103.0
+uvicorn[standard]>=0.23.0
+python-multipart>=0.0.6
