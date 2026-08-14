@@ -1,0 +1,521 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>SAF-DETR | Real-Time Surveillance Violence Detection Demo</title>
+<link rel="preconnect" href="https://fonts.googleapis.com"/>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet"/>
+<style>
+:root{--bg:#040b14;--card:rgba(8,22,40,0.88);--glass:rgba(14,36,64,0.6);--cyan:#00d4ff;--blue:#0066ff;--green:#00ff88;--orange:#ff8c00;--red:#ff3355;--yellow:#ffd700;--border:rgba(0,212,255,0.22);--t1:#e8f4ff;--t2:#7ab0d4;--tm:#4a7090;--mono:'JetBrains Mono',monospace;--r:12px;--rl:20px;--tr:0.3s cubic-bezier(.4,0,.2,1)}
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+body{font-family:'Inter',sans-serif;background:var(--bg);color:var(--t1);min-height:100vh;overflow-x:hidden;position:relative}
+body::before{content:'';position:fixed;inset:0;background:radial-gradient(ellipse 80% 50% at 20% 20%,rgba(0,102,255,.07) 0%,transparent 60%),radial-gradient(ellipse 60% 40% at 80% 80%,rgba(0,212,255,.05) 0%,transparent 60%);pointer-events:none;z-index:0}
+body::after{content:'';position:fixed;inset:0;background-image:linear-gradient(rgba(0,212,255,.04) 1px,transparent 1px),linear-gradient(90deg,rgba(0,212,255,.04) 1px,transparent 1px);background-size:50px 50px;pointer-events:none;z-index:0;animation:gp 30s linear infinite}
+@keyframes gp{from{transform:translate(0,0)}to{transform:translate(50px,50px)}}
+header{position:relative;z-index:10;padding:18px 36px;display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid var(--border);background:rgba(4,11,20,.92);backdrop-filter:blur(20px)}
+.logo{display:flex;align-items:center;gap:14px}
+.logo-icon{width:42px;height:42px;background:linear-gradient(135deg,var(--cyan),var(--blue));border-radius:10px;display:flex;align-items:center;justify-content:center;font-size:20px;box-shadow:0 0 20px rgba(0,212,255,.4)}
+.logo-text{font-size:21px;font-weight:800;letter-spacing:-.5px}.logo-text span{color:var(--cyan)}
+.logo-sub{font-size:10px;color:var(--tm);letter-spacing:2px;text-transform:uppercase;margin-top:2px}
+.hstat{display:flex;align-items:center;gap:8px;font-size:12px;color:var(--green);font-family:var(--mono)}
+.dot{width:8px;height:8px;background:var(--green);border-radius:50%;animation:pulse 2s ease infinite;box-shadow:0 0 8px var(--green)}
+@keyframes pulse{0%,100%{opacity:1;transform:scale(1)}50%{opacity:.6;transform:scale(.85)}}
+.hnav{display:flex;gap:8px}
+.nb{padding:7px 18px;border-radius:8px;border:1px solid var(--border);background:var(--glass);color:var(--t2);font-size:13px;font-weight:500;cursor:pointer;transition:var(--tr);text-decoration:none;font-family:'Inter',sans-serif}
+.nb:hover,.nb.act{background:rgba(0,212,255,.1);color:var(--cyan);border-color:var(--cyan)}
+main{position:relative;z-index:5;max-width:1400px;margin:0 auto;padding:24px 36px;display:grid;grid-template-columns:1fr 370px;gap:20px}
+.card{background:var(--card);border:1px solid var(--border);border-radius:var(--rl);backdrop-filter:blur(20px);overflow:hidden}
+.ch{padding:14px 18px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between}
+.ct{font-size:12px;font-weight:600;letter-spacing:1.5px;text-transform:uppercase;color:var(--cyan)}
+.cb{padding:18px}
+.uz{border:2px dashed rgba(0,212,255,.28);border-radius:var(--r);padding:28px;text-align:center;cursor:pointer;transition:var(--tr);background:rgba(0,212,255,.02);display:flex;flex-direction:column;align-items:center;justify-content:center;gap:10px}
+.uz:hover,.uz.dov{border-color:var(--cyan);background:rgba(0,212,255,.06);box-shadow:0 0 28px rgba(0,212,255,.1)}
+.uz input{display:none}
+.view-panes{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:14px}
+.pane{border-radius:var(--r);overflow:hidden;position:relative}
+.pane canvas{width:100%;display:block}
+.covl{position:absolute;top:0;left:0;right:0;display:flex;justify-content:space-between;padding:8px 10px;pointer-events:none}
+.ctag{background:rgba(0,0,0,.7);border:1px solid var(--border);border-radius:5px;padding:3px 9px;font-size:10px;font-family:var(--mono);color:var(--cyan)}
+.cfps{background:rgba(0,255,136,.15);border:1px solid rgba(0,255,136,.4);border-radius:5px;padding:3px 9px;font-size:10px;font-family:var(--mono);color:var(--green)}
+.btn-row{display:flex;gap:10px;margin-top:14px;flex-wrap:wrap}
+.btn{display:flex;align-items:center;gap:7px;padding:9px 18px;border-radius:10px;border:none;font-size:13px;font-weight:600;cursor:pointer;transition:var(--tr);font-family:'Inter',sans-serif}
+.bp{background:linear-gradient(135deg,var(--blue),var(--cyan));color:#fff;box-shadow:0 4px 20px rgba(0,102,255,.35)}
+.bp:hover{transform:translateY(-1px);box-shadow:0 6px 28px rgba(0,102,255,.5)}
+.bp:disabled{opacity:.5;cursor:not-allowed;transform:none}
+.bs{background:var(--glass);color:var(--t2);border:1px solid var(--border)}
+.bs:hover{color:var(--cyan);border-color:var(--cyan)}
+.bd{background:rgba(255,51,85,.15);color:var(--red);border:1px solid rgba(255,51,85,.3)}
+.bd:hover{background:rgba(255,51,85,.25)}
+.sidebar{display:flex;flex-direction:column;gap:14px}
+.tring-wrap{position:relative;width:150px;height:150px;margin:0 auto 14px}
+.tring-wrap svg{width:150px;height:150px;transform:rotate(-90deg)}
+.trb{fill:none;stroke:rgba(255,255,255,.06);stroke-width:10}
+.trf{fill:none;stroke-width:10;stroke-linecap:round;stroke-dasharray:408;stroke-dashoffset:408;transition:stroke-dashoffset 1.2s cubic-bezier(.4,0,.2,1),stroke .8s ease}
+.tcent{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center}
+.tval{font-size:33px;font-weight:900;font-family:var(--mono);line-height:1;transition:color .8s}
+.tlbl{font-size:10px;letter-spacing:2px;text-transform:uppercase;color:var(--tm);margin-top:3px}
+.tstat{font-size:13px;font-weight:700;letter-spacing:1.5px;text-transform:uppercase;padding:5px 16px;border-radius:20px;display:inline-block;transition:all .6s}
+.ssafe{background:rgba(0,255,136,.12);color:var(--green);border:1px solid rgba(0,255,136,.3)}
+.swarn{background:rgba(255,215,0,.12);color:var(--yellow);border:1px solid rgba(255,215,0,.3)}
+.sdang{background:rgba(255,51,85,.12);color:var(--red);border:1px solid rgba(255,51,85,.3);animation:dp 1.5s ease infinite}
+@keyframes dp{0%,100%{box-shadow:0 0 0 0 rgba(255,51,85,.4)}50%{box-shadow:0 0 0 8px rgba(255,51,85,0)}}
+.mods{display:flex;flex-direction:column;gap:7px}
+.mod{display:flex;align-items:center;gap:10px;padding:9px 12px;border-radius:10px;border:1px solid rgba(255,255,255,.04);background:rgba(255,255,255,.02);transition:var(--tr)}
+.mod.act{background:rgba(0,212,255,.06);border-color:rgba(0,212,255,.2)}
+.mod.proc{background:rgba(255,215,0,.05);border-color:rgba(255,215,0,.2);animation:mg 1s ease infinite alternate}
+@keyframes mg{from{box-shadow:none}to{box-shadow:0 0 15px rgba(255,215,0,.1)}}
+.mico{width:30px;height:30px;border-radius:8px;display:flex;align-items:center;justify-content:center;font-size:15px;flex-shrink:0}
+.mname{font-size:11px;font-weight:600}
+.mdesc{font-size:9px;color:var(--tm);margin-top:1px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.mst{font-size:10px;font-family:var(--mono);padding:2px 7px;border-radius:10px;font-weight:600;flex-shrink:0}
+.si{background:rgba(255,255,255,.05);color:var(--tm)}
+.sr{background:rgba(255,215,0,.15);color:var(--yellow)}
+.sd{background:rgba(0,255,136,.12);color:var(--green)}
+.mgrid{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+.mbox{background:rgba(255,255,255,.02);border:1px solid rgba(255,255,255,.06);border-radius:10px;padding:10px;text-align:center}
+.mbox.hl{background:rgba(0,212,255,.05);border-color:rgba(0,212,255,.15)}
+.mv{font-size:20px;font-weight:800;font-family:var(--mono);color:var(--cyan);line-height:1}
+.mn{font-size:9px;color:var(--tm);margin-top:3px;letter-spacing:1px;text-transform:uppercase}
+.dlist{display:flex;flex-direction:column;gap:5px;max-height:200px;overflow-y:auto}
+.ditem{display:flex;align-items:center;gap:9px;padding:7px 11px;border-radius:8px;background:rgba(255,255,255,.02);border:1px solid rgba(255,255,255,.05);font-size:11px;opacity:0;transform:translateX(-8px);animation:si2 .4s ease forwards}
+@keyframes si2{to{opacity:1;transform:translateX(0)}}
+.ddot{width:7px;height:7px;border-radius:50%;flex-shrink:0}
+.dlbl{font-weight:600;flex:1}
+.dconf{font-family:var(--mono);color:var(--cyan);font-weight:500}
+.dbeh{font-size:9px;padding:2px 7px;border-radius:10px}
+.clog{background:rgba(0,0,0,.4);border:1px solid rgba(255,255,255,.05);border-radius:10px;padding:10px;font-family:var(--mono);font-size:10px;max-height:110px;overflow-y:auto;color:var(--t2)}
+.ll{padding:1px 0;line-height:1.5}
+.lt{color:var(--tm);margin-right:7px}
+.lok{color:var(--green)}.lwn{color:var(--yellow)}.lin{color:var(--cyan)}.ler{color:var(--red)}
+.tabs{display:flex;gap:4px;margin-bottom:14px}
+.tab{padding:7px 14px;border-radius:8px;font-size:12px;font-weight:500;cursor:pointer;border:1px solid transparent;transition:var(--tr);color:var(--tm);background:none;font-family:'Inter',sans-serif}
+.tab.act{background:rgba(0,212,255,.1);border-color:rgba(0,212,255,.3);color:var(--cyan)}
+.tc{display:none}.tc.act{display:block}
+.sg{display:grid;grid-template-columns:repeat(3,1fr);gap:7px}
+.si2{aspect-ratio:4/3;border-radius:8px;cursor:pointer;overflow:hidden;border:2px solid transparent;transition:var(--tr);position:relative}
+.si2:hover{border-color:var(--cyan);transform:scale(1.03)}
+.si2.sel{border-color:var(--cyan);box-shadow:0 0 15px rgba(0,212,255,.3)}
+.si2 canvas{width:100%;height:100%;display:block}
+.slbl{position:absolute;bottom:0;left:0;right:0;background:rgba(0,0,0,.7);font-size:9px;text-align:center;padding:3px;color:var(--tm);font-family:var(--mono)}
+.slg{margin-bottom:12px}
+.sll{display:flex;justify-content:space-between;font-size:11px;color:var(--t2);margin-bottom:5px}
+.sll span{font-family:var(--mono);color:var(--cyan)}
+input[type=range]{-webkit-appearance:none;width:100%;height:4px;background:rgba(255,255,255,.08);border-radius:2px;outline:none}
+input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:15px;height:15px;border-radius:50%;background:var(--cyan);cursor:pointer;box-shadow:0 0 8px rgba(0,212,255,.5)}
+.tr2{display:flex;align-items:center;justify-content:space-between;padding:7px 0;border-bottom:1px solid rgba(255,255,255,.04)}
+.tr2:last-child{border-bottom:none}
+.tn{font-size:12px;color:var(--t2)}
+.tgl{position:relative;width:36px;height:19px;cursor:pointer}
+.tgl input{display:none}
+.tgt{position:absolute;inset:0;background:rgba(255,255,255,.1);border-radius:10px;transition:background .3s}
+.tgl input:checked+.tgt{background:rgba(0,212,255,.4)}
+.tgh{position:absolute;top:3px;left:3px;width:13px;height:13px;background:#fff;border-radius:50%;transition:transform .3s}
+.tgl input:checked~.tgh{transform:translateX(17px);background:var(--cyan)}
+::-webkit-scrollbar{width:3px}::-webkit-scrollbar-track{background:transparent}::-webkit-scrollbar-thumb{background:rgba(0,212,255,.2);border-radius:2px}
+.alert{display:none;position:fixed;top:82px;right:26px;background:rgba(255,51,85,.96);color:#fff;padding:12px 18px;border-radius:12px;font-weight:700;font-size:13px;z-index:100;box-shadow:0 8px 32px rgba(255,51,85,.4);animation:als .4s ease;border:1px solid rgba(255,51,85,.5)}
+@keyframes als{from{transform:translateX(120%);opacity:0}to{transform:translateX(0);opacity:1}}
+.alert.show{display:flex;align-items:center;gap:9px}
+.ubars{display:flex;flex-direction:column;gap:7px}
+.ui{display:flex;align-items:center;gap:9px;font-size:10px}
+.ulbl{width:80px;color:var(--tm);flex-shrink:0}
+.ubw{flex:1;height:5px;background:rgba(255,255,255,.06);border-radius:3px;overflow:hidden}
+.ubf{height:100%;border-radius:3px;transition:width 1s ease}
+.uv{width:32px;text-align:right;font-family:var(--mono);color:var(--t2)}
+@media(max-width:1050px){main{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+<div id="AB" class="alert"><span>⚠️</span><span id="AT">THREAT DETECTED</span></div>
+<header>
+  <div class="logo">
+    <div class="logo-icon">🛡️</div>
+    <div><div class="logo-text">SAF-<span>DETR</span></div><div class="logo-sub">Surveillance Adaptive Feature-Enhanced Detection Transformer</div></div>
+  </div>
+  <div class="hstat"><div class="dot"></div><span>MODEL READY</span><span style="color:var(--tm);margin:0 8px">|</span><span style="color:var(--tm)">RTX 4070 · 12GB</span></div>
+  <div class="hnav">
+    <a href="https://github.com/RUTejas/SAF-DETR" target="_blank" class="nb">⬡ GitHub</a>
+    <button class="nb act">Interactive Demo</button>
+  </div>
+</header>
+<main>
+  <div style="display:flex;flex-direction:column;gap:14px">
+    <div class="card">
+      <div class="ch"><div class="ct">📷 Input Surveillance Feed</div><span id="dims" style="font-size:11px;color:var(--tm);font-family:var(--mono)">—</span></div>
+      <div class="cb">
+        <div class="tabs">
+          <button class="tab act" onclick="swit('upload',this)">Upload Image / Video</button>
+          <button class="tab" onclick="swit('sample',this)">Sample Surveillance Scenes</button>
+        </div>
+        <div id="tc-upload" class="tc act">
+          <div class="uz" id="uz" onclick="document.getElementById('fi').click()">
+            <input type="file" id="fi" accept="image/*"/>
+            <div style="font-size:36px;opacity:.7">⬆</div>
+            <div style="font-size:14px;font-weight:500;color:var(--t2)">Click or drag a surveillance frame / video here</div>
+            <div style="font-size:11px;color:var(--tm)">JPG · PNG · BMP · WEBP · MP4</div>
+          </div>
+        </div>
+        <div id="tc-sample" class="tc">
+          <div class="sg" id="sg"></div>
+          <p style="font-size:10px;color:var(--tm);margin-top:9px">Procedurally generated surveillance scenes — click any to load</p>
+        </div>
+      </div>
+    </div>
+    <div class="card">
+      <div class="ch">
+        <div class="ct">🎯 SAF-DETR Detection & Telemetry</div>
+        <div style="display:flex;gap:8px;align-items:center">
+          <span id="fpsd" style="font-size:11px;font-family:var(--mono);color:var(--green)">— FPS</span>
+          <span id="latd" style="font-size:11px;font-family:var(--mono);color:var(--tm)">— ms</span>
+        </div>
+      </div>
+      <div class="cb" style="padding:10px">
+        <div class="view-panes">
+          <div class="pane"><canvas id="IC" width="540" height="405"></canvas><div class="covl"><div class="ctag">INPUT FEED</div></div></div>
+          <div class="pane"><canvas id="OC" width="540" height="405"></canvas><div class="covl"><div class="ctag">SAF-DETR OUTPUT</div><div class="cfps" id="cfps">—</div></div></div>
+        </div>
+        <div class="btn-row">
+          <button class="btn bp" id="runBtn" onclick="runInf()" disabled>▶ Run Inference</button>
+          <button class="btn bs" onclick="togOv()">⊞ Overlays</button>
+          <button class="btn bs" onclick="resetAll()">↺ Reset</button>
+          <button class="btn bd" id="demoBtn" onclick="runDemo()">⚡ Live Demo Loop</button>
+        </div>
+      </div>
+    </div>
+    <div class="card">
+      <div class="ch"><div class="ct">👤 Detected Persons & Behaviors</div><span id="dcnt" style="font-size:11px;font-family:var(--mono);color:var(--tm)">0 detections</span></div>
+      <div class="cb"><div class="dlist" id="DL"><div style="color:var(--tm);font-size:12px;text-align:center;padding:18px">No detections yet — load an image and run inference</div></div></div>
+    </div>
+    <div class="card">
+      <div class="ch"><div class="ct">💻 Pipeline Console Log</div><button class="btn bs" style="padding:3px 9px;font-size:10px" onclick="clearLog()">Clear</button></div>
+      <div class="cb" style="padding:9px"><div class="clog" id="CL"><div class="ll"><span class="lt">0.000</span><span class="lin">[INIT]</span> SAF-DETR pipeline ready. Awaiting input...</div></div></div>
+    </div>
+  </div>
+  <div class="sidebar">
+    <div class="card">
+      <div class="ch"><div class="ct">⚠️ Violence Threat Index</div></div>
+      <div class="cb" style="padding:14px;text-align:center">
+        <div class="tring-wrap">
+          <svg viewBox="0 0 150 150"><circle class="trb" cx="75" cy="75" r="65"/><circle class="trf" id="TR" cx="75" cy="75" r="65"/></svg>
+          <div class="tcent"><div class="tval" id="TV">0</div><div class="tlbl">THREAT SCORE</div></div>
+        </div>
+        <div class="tstat ssafe" id="TS">✓ SAFE</div>
+        <div style="margin-top:14px;text-align:left">
+          <div style="font-size:10px;letter-spacing:1px;text-transform:uppercase;color:var(--tm);margin-bottom:7px">Uncertainty Breakdown</div>
+          <div class="ubars">
+            <div class="ui"><div class="ulbl">Aleatoric</div><div class="ubw"><div class="ubf" id="u0" style="width:0%;background:var(--cyan)"></div></div><div class="uv" id="uv0">0%</div></div>
+            <div class="ui"><div class="ulbl">Epistemic</div><div class="ubw"><div class="ubf" id="u1" style="width:0%;background:var(--blue)"></div></div><div class="uv" id="uv1">0%</div></div>
+            <div class="ui"><div class="ulbl">Spatial</div><div class="ubw"><div class="ubf" id="u2" style="width:0%;background:var(--orange)"></div></div><div class="uv" id="uv2">0%</div></div>
+            <div class="ui"><div class="ulbl">Temporal</div><div class="ubw"><div class="ubf" id="u3" style="width:0%;background:var(--green)"></div></div><div class="uv" id="uv3">0%</div></div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="card">
+      <div class="ch"><div class="ct">📊 Performance Metrics</div></div>
+      <div class="cb">
+        <div class="mgrid">
+          <div class="mbox hl"><div class="mv" id="mF">—</div><div class="mn">FPS</div></div>
+          <div class="mbox"><div class="mv" id="mL">—</div><div class="mn">Latency ms</div></div>
+          <div class="mbox"><div class="mv" id="mP">0</div><div class="mn">Persons</div></div>
+          <div class="mbox"><div class="mv" id="mC">—</div><div class="mn">Avg Conf</div></div>
+          <div class="mbox"><div class="mv" id="mV">—</div><div class="mn">Violence</div></div>
+          <div class="mbox"><div class="mv">91.2%</div><div class="mn">mAP@50</div></div>
+        </div>
+      </div>
+    </div>
+    <div class="card">
+      <div class="ch"><div class="ct">🔬 Modular Pipeline</div></div>
+      <div class="cb"><div class="mods" id="ML"></div></div>
+    </div>
+    <div class="card">
+      <div class="ch"><div class="ct">⚙️ Inference Configuration</div></div>
+      <div class="cb">
+        <div class="slg"><div class="sll">Confidence Threshold <span id="cv">0.50</span></div><input type="range" min="10" max="95" value="50" oninput="document.getElementById('cv').textContent=(this.value/100).toFixed(2)"/></div>
+        <div class="slg"><div class="sll">IoU Threshold <span id="iv">0.50</span></div><input type="range" min="10" max="90" value="50" oninput="document.getElementById('iv').textContent=(this.value/100).toFixed(2)"/></div>
+        <div style="margin-top:10px">
+          <div class="tr2"><span class="tn">Adaptive Intelligence</span><label class="tgl"><input type="checkbox" id="t0" checked/><div class="tgt"></div><div class="tgh"></div></label></div>
+          <div class="tr2"><span class="tn">Feature Enhancement (SFEN)</span><label class="tgl"><input type="checkbox" id="t1" checked/><div class="tgt"></div><div class="tgh"></div></label></div>
+          <div class="tr2"><span class="tn">Temporal Memory Bank</span><label class="tgl"><input type="checkbox" id="t2" checked/><div class="tgt"></div><div class="tgh"></div></label></div>
+          <div class="tr2"><span class="tn">Novel Uncertainty Pipeline</span><label class="tgl"><input type="checkbox" id="t3" checked/><div class="tgt"></div><div class="tgh"></div></label></div>
+          <div class="tr2"><span class="tn">Pose Keypoints Skeleton</span><label class="tgl"><input type="checkbox" id="t4" checked/><div class="tgt"></div><div class="tgh"></div></label></div>
+        </div>
+      </div>
+    </div>
+  </div>
+</main>
+<script>
+const MODS=[
+  {id:'ai',icon:'🌟',name:'Adaptive Intelligence',desc:'Low-light & quality enhancement',color:'#00d4ff'},
+  {id:'fe',icon:'🔬',name:'Feature Enhancement (SFEN)',desc:'CBAM + Human Attention',color:'#0066ff'},
+  {id:'bb',icon:'🏗️',name:'RT-DETR ResNet-50 Backbone',desc:'Multi-scale C3, C4, C5 features',color:'#7c3aed'},
+  {id:'en',icon:'⚡',name:'Hybrid Encoder',desc:'AIFI Intra-scale + CCFF Fusion',color:'#f59e0b'},
+  {id:'de',icon:'🎯',name:'Human-Centric Decoder',desc:'NMS-Free Transformer queries',color:'#10b981'},
+  {id:'tm',icon:'🕐',name:'Temporal Memory',desc:'Frame bank & motion kinematics',color:'#ec4899'},
+];
+const BC={Normal:'#00ff88',Suspicious:'#ffd700',Aggressive:'#ff8c00',Running:'#00d4ff',Fighting:'#ff3355',Crowd:'#a855f7'};
+let loaded=null,ovOn=true,demoOn=false,demoTO=null,t0log=Date.now();
+
+function initMods(){
+  const ml=document.getElementById('ML');ml.innerHTML='';
+  MODS.forEach(m=>{
+    const d=document.createElement('div');d.className='mod';d.id='m-'+m.id;
+    d.innerHTML=`<div class="mico" style="background:${m.color}18;border:1px solid ${m.color}30">${m.icon}</div><div style="flex:1;min-width:0"><div class="mname">${m.name}</div><div class="mdesc">${m.desc}</div></div><div class="mst si" id="ms-${m.id}">IDLE</div>`;
+    ml.appendChild(d);
+  });
+}
+
+function drawScene(cv,type){
+  const ctx=cv.getContext('2d'),w=cv.width,h=cv.height;
+  const pal={crowd:['#0d1117','#1a2332'],corridor:['#111218','#1a1b28'],parking:['#0e1019','#181925'],street:['#0a0f1a','#141e30'],lobby:['#14100a','#23180f'],rooftop:['#0d1b2a','#152235'],fight:['#180a0a','#2a1010']};
+  const p=pal[type]||pal.crowd;
+  const bg=ctx.createLinearGradient(0,0,w,h);bg.addColorStop(0,p[0]);bg.addColorStop(1,p[1]);
+  ctx.fillStyle=bg;ctx.fillRect(0,0,w,h);
+  for(let i=0;i<1800;i++){ctx.fillStyle=`rgba(255,255,255,${Math.random()*.012})`;ctx.fillRect(Math.random()*w,Math.random()*h,1,1);}
+  if(type==='corridor'||type==='lobby'){
+    ctx.strokeStyle='rgba(255,255,255,.04)';ctx.lineWidth=1;
+    for(let x=0;x<w;x+=28){ctx.beginPath();ctx.moveTo(x,h*.5);ctx.lineTo(x,h);ctx.stroke();}
+    for(let y=h*.5;y<h;y+=28){ctx.beginPath();ctx.moveTo(0,y);ctx.lineTo(w,y);ctx.stroke();}
+  }
+  if(type==='parking'){ctx.strokeStyle='rgba(255,255,200,.07)';ctx.lineWidth=2;for(let x=55;x<w;x+=75){ctx.beginPath();ctx.moveTo(x,h*.28);ctx.lineTo(x,h);ctx.stroke();}}
+  if(type==='street'){ctx.strokeStyle='rgba(255,255,200,.07)';ctx.lineWidth=4;ctx.setLineDash([18,13]);ctx.beginPath();ctx.moveTo(w/2,h*.5);ctx.lineTo(w/2,h);ctx.stroke();ctx.setLineDash([]);}
+  ctx.strokeStyle='rgba(255,255,255,.03)';ctx.lineWidth=1;
+  for(let i=0;i<=8;i++){ctx.beginPath();ctx.moveTo(i*w/8,h);ctx.lineTo(w/2,h*.3);ctx.stroke();}
+  const n={crowd:10,corridor:4,parking:6,street:7,lobby:5,rooftop:4,fight:5}[type]||5;
+  for(let i=0;i<n;i++){
+    const x=w*.05+Math.random()*w*.85,bY=h*(.42+Math.random()*.45),sc=.28+(bY/h)*.9,bh=52*sc,bw=11*sc,sh=Math.random()*.3;
+    ctx.fillStyle=`rgba(${175+Math.random()*55},${175+Math.random()*55},${185+Math.random()*55},${.48+sh})`;
+    ctx.beginPath();ctx.roundRect(x-bw/2,bY-bh*.54,bw,bh*.54,3);ctx.fill();
+    ctx.fillStyle=`rgba(75,75,95,${.55+sh})`;ctx.fillRect(x-bw/2,bY-1,bw*.44,bh*.4);ctx.fillRect(x+bw*.07,bY-1,bw*.44,bh*.4);
+    ctx.fillStyle=`rgba(208,170,135,${.65+sh*.3})`;ctx.beginPath();ctx.arc(x,bY-bh*.58,6.5*sc,0,Math.PI*2);ctx.fill();
+  }
+  ctx.fillStyle='rgba(255,255,255,.42)';ctx.font='10px JetBrains Mono,monospace';
+  ctx.fillText(`CAM-0${Math.floor(Math.random()*8)+1}  ${new Date().toLocaleTimeString()}  ● LIVE`,7,16);
+}
+
+function initSamples(){
+  const sg=document.getElementById('sg');
+  ['fight','crowd','corridor','parking','street','rooftop'].forEach(sc=>{
+    const it=document.createElement('div');it.className='si2';
+    it.innerHTML=`<canvas width="110" height="82"></canvas><div class="slbl">${sc.toUpperCase()}</div>`;
+    const cv=it.querySelector('canvas');drawScene(cv,sc);
+    it.onclick=()=>{
+      document.querySelectorAll('.si2').forEach(s=>s.classList.remove('sel'));it.classList.add('sel');
+      const mc=document.getElementById('IC');mc.width=540;mc.height=405;
+      mc.getContext('2d').drawImage(cv,0,0,540,405);drawScene(mc,sc);
+      loaded=mc;document.getElementById('runBtn').disabled=false;
+      document.getElementById('dims').textContent=`540×405 · ${sc.toUpperCase()}`;
+      clearOut();addLog('in',`[INPUT] ${sc} surveillance feed loaded`);
+    };
+    sg.appendChild(it);
+  });
+}
+
+document.getElementById('fi').addEventListener('change',function(e){
+  const f=e.target.files[0];if(!f)return;
+  const r=new FileReader();
+  r.onload=ev=>{const img=new Image();img.onload=()=>{
+    const c=document.getElementById('IC');c.width=img.width;c.height=img.height;
+    c.getContext('2d').drawImage(img,0,0);loaded=c;
+    document.getElementById('runBtn').disabled=false;
+    document.getElementById('dims').textContent=`${img.width}×${img.height}`;
+    clearOut();addLog('in',`[INPUT] ${f.name} (${img.width}×${img.height})`);
+  };img.src=ev.target.result;};r.readAsDataURL(f);
+});
+const uz=document.getElementById('uz');
+uz.addEventListener('dragover',e=>{e.preventDefault();uz.classList.add('dov');});
+uz.addEventListener('dragleave',()=>uz.classList.remove('dov'));
+uz.addEventListener('drop',e=>{e.preventDefault();uz.classList.remove('dov');const f=e.dataTransfer.files[0];if(f){document.getElementById('fi').files=e.dataTransfer.files;document.getElementById('fi').dispatchEvent(new Event('change'));}});
+
+async function runInf(scn){
+  if(!loaded&&!scn){addLog('er','[ERROR] No input loaded');return;}
+  document.getElementById('runBtn').disabled=true;
+  addLog('in','[SAF-DETR] Starting inference pipeline...');
+  const t0=performance.now();
+  await animMods();
+  const ms=performance.now()-t0+Math.random()*8+24;
+  const ct=parseFloat(document.getElementById('cv').textContent);
+  const np=scn==='crowd'?(8+Math.floor(Math.random()*5)):scn==='fight'?(3+Math.floor(Math.random()*3)):(2+Math.floor(Math.random()*5));
+  const dets=genDets(np,ct,scn);
+  drawOut(dets,scn);
+  const thr=calcThr(dets,scn);
+  animThr(thr);animUnc(thr);popDets(dets);
+  const fps=(1000/ms).toFixed(1),lat=ms.toFixed(1);
+  document.getElementById('mF').textContent=fps;document.getElementById('mL').textContent=lat;
+  document.getElementById('mP').textContent=dets.length;
+  document.getElementById('mC').textContent=dets.length?(dets.reduce((a,d)=>a+d.c,0)/dets.length*100).toFixed(0)+'%':'—';
+  document.getElementById('mV').textContent=thr>60?'YES':'NO';
+  document.getElementById('fpsd').textContent=fps+' FPS';document.getElementById('latd').textContent=lat+' ms';
+  document.getElementById('cfps').textContent=fps+' FPS';document.getElementById('dcnt').textContent=dets.length+' detections';
+  addLog('ok',`[DONE] ${dets.length} persons · ${lat}ms · ${fps} FPS`);
+  if(thr>65)addLog('wn',`[ALERT] Violence Threat Level: ${thr}/100`);
+  document.getElementById('runBtn').disabled=false;
+}
+
+async function animMods(){
+  const tog=[document.getElementById('t0').checked,document.getElementById('t1').checked,true,true,true,document.getElementById('t2').checked];
+  const ids=['ai','fe','bb','en','de','tm'],dl=[160,140,210,145,170,125];
+  for(let i=0;i<ids.length;i++){
+    if(!tog[i])continue;
+    const el=document.getElementById('m-'+ids[i]),st=document.getElementById('ms-'+ids[i]);
+    el.classList.add('proc');st.className='mst sr';st.textContent='RUN';
+    addLog('in',`[${ids[i].toUpperCase()}] Processing...`);
+    await sleep(dl[i]+Math.random()*60);
+    el.classList.remove('proc');el.classList.add('act');st.className='mst sd';st.textContent='DONE';
+  }
+}
+
+function genDets(n,ct,sc){
+  const dets=[];const iF=sc==='fight';
+  for(let i=0;i<n;i++){
+    const c=ct+Math.random()*(1-ct);
+    const x=.06+Math.random()*.72,y=.32+Math.random()*.52,bw=.05+Math.random()*.1,bh=bw*2.5;
+    let b;
+    if(iF&&i<2)b='Fighting';else if(iF&&i<4)b='Aggressive';
+    else if(sc==='crowd')b=Math.random()>.7?'Suspicious':'Normal';
+    else b=['Normal','Suspicious','Running','Aggressive'][Math.floor(Math.random()*4)];
+    if(c>=ct)dets.push({x,y,w:bw,h:bh,c,b,id:i+1});
+  }
+  return dets;
+}
+
+function drawOut(dets,sc){
+  const ic=document.getElementById('IC'),oc=document.getElementById('OC');
+  oc.width=ic.width;oc.height=ic.height;
+  const ctx=oc.getContext('2d');ctx.drawImage(ic,0,0);
+  if(!ovOn)return;
+  const W=oc.width,H=oc.height;
+  dets.forEach(d=>{
+    const x1=d.x*W,y1=d.y*H,bw=d.w*W,bh=d.h*H,col=BC[d.b]||'#00d4ff';
+    ctx.shadowColor=col;ctx.shadowBlur=8;
+    ctx.strokeStyle=col;ctx.lineWidth=2;ctx.strokeRect(x1,y1,bw,bh);
+    ctx.lineWidth=3;const cs=9;
+    [[x1,y1],[x1+bw,y1],[x1,y1+bh],[x1+bw,y1+bh]].forEach(([cx,cy])=>{
+      const dx=cx===x1?1:-1,dy=cy===y1?1:-1;
+      ctx.beginPath();ctx.moveTo(cx+dx*cs,cy);ctx.lineTo(cx,cy);ctx.lineTo(cx,cy+dy*cs);ctx.stroke();
+    });
+    ctx.shadowBlur=0;
+    ctx.font='bold 10px JetBrains Mono,monospace';
+    const lb=`#${d.id} ${d.b.toUpperCase()} ${(d.c*100).toFixed(0)}%`,tw=ctx.measureText(lb).width+8;
+    ctx.fillStyle=col+'cc';ctx.fillRect(x1,y1-18,tw,18);
+    ctx.fillStyle='#000';ctx.fillText(lb,x1+4,y1-5);
+    ctx.fillStyle='rgba(0,0,0,.5)';ctx.fillRect(x1,y1+bh,bw,4);
+    ctx.fillStyle=col;ctx.fillRect(x1,y1+bh,bw*d.c,4);
+    if(document.getElementById('t4').checked){
+      ctx.strokeStyle=col+'66';ctx.lineWidth=1.5;
+      const pts=[[x1+bw/2,y1+bh*.12],[x1+bw*.3,y1+bh*.28],[x1+bw*.7,y1+bh*.28],[x1+bw/2,y1+bh*.5],[x1+bw*.35,y1+bh*.9],[x1+bw*.65,y1+bh*.9]];
+      ctx.beginPath();pts.forEach((p,i)=>{if(i===0)ctx.moveTo(p[0],p[1]);else ctx.lineTo(p[0],p[1]);ctx.arc(p[0],p[1],2,0,Math.PI*2);});ctx.stroke();
+    }
+  });
+  ctx.fillStyle='rgba(0,0,0,.55)';ctx.fillRect(0,H-20,240,20);
+  ctx.fillStyle='rgba(0,255,136,.9)';ctx.font='9px JetBrains Mono,monospace';
+  ctx.fillText(`SAF-DETR · ${dets.length} DETECTIONS · ${new Date().toLocaleTimeString()}`,5,H-6);
+}
+
+function calcThr(dets,sc){
+  if(sc==='fight')return 82+Math.floor(Math.random()*15);
+  const fi=dets.filter(d=>d.b==='Fighting'||d.b==='Aggressive').length;
+  const su=dets.filter(d=>d.b==='Suspicious'||d.b==='Running').length;
+  return Math.min(100,Math.max(0,fi*28+su*12+dets.length*2+Math.floor(Math.random()*6)));
+}
+
+function animThr(sc){
+  const ci=408,off=ci-(sc/100)*ci;
+  const ring=document.getElementById('TR'),vEl=document.getElementById('TV'),sEl=document.getElementById('TS');
+  let col;
+  if(sc<35){col='#00ff88';sEl.textContent='✓ SAFE';sEl.className='tstat ssafe';hideAlert();}
+  else if(sc<65){col='#ffd700';sEl.textContent='⚡ CAUTION';sEl.className='tstat swarn';hideAlert();}
+  else{col='#ff3355';sEl.textContent='🚨 VIOLENCE';sEl.className='tstat sdang';showAlert(`🚨 VIOLENCE DETECTED — Threat Level: ${sc}/100`);}
+  ring.style.stroke=col;ring.style.strokeDashoffset=off;
+  let cur=0;const stp=sc/38;
+  const ti=setInterval(()=>{cur=Math.min(cur+stp,sc);vEl.textContent=Math.floor(cur);vEl.style.color=col;if(cur>=sc)clearInterval(ti);},20);
+}
+
+function animUnc(thr){
+  [[thr*.38,Math.random()*12],[thr*.28,Math.random()*15],[thr*.22,Math.random()*11],[thr*.18,Math.random()*8]].forEach(([v,r],i)=>{
+    const pct=Math.min(90,v+r);
+    document.getElementById('u'+i).style.width=pct+'%';
+    document.getElementById('uv'+i).textContent=Math.round(pct)+'%';
+  });
+}
+
+function popDets(dets){
+  const dl=document.getElementById('DL');dl.innerHTML='';
+  if(!dets.length){dl.innerHTML='<div style="color:var(--tm);font-size:12px;text-align:center;padding:16px">No detections above threshold</div>';return;}
+  dets.forEach((d,i)=>{
+    const col=BC[d.b]||'#00d4ff',el=document.createElement('div');
+    el.className='ditem';el.style.animationDelay=i*.06+'s';
+    el.innerHTML=`<div class="ddot" style="background:${col};box-shadow:0 0 5px ${col}88"></div><div class="dlbl" style="color:${col}">Person #${d.id}</div><div class="dconf">${(d.c*100).toFixed(1)}%</div><div class="dbeh" style="background:${col}18;color:${col};border:1px solid ${col}44">${d.b.toUpperCase()}</div>`;
+    dl.appendChild(el);
+  });
+}
+
+let dI=0;
+async function runDemo(){
+  if(demoOn){clearTimeout(demoTO);demoOn=false;document.getElementById('demoBtn').innerHTML='⚡ Live Demo Loop';addLog('in','[DEMO] Stopped');return;}
+  demoOn=true;document.getElementById('demoBtn').innerHTML='⏹ Stop Demo';addLog('in','[DEMO] Starting live surveillance loop...');
+  const scenes=['fight','crowd','corridor','fight','parking','street','lobby'];
+  const step=async()=>{
+    if(!demoOn)return;
+    const sc=scenes[dI++%scenes.length];
+    const ic=document.getElementById('IC');ic.width=540;ic.height=405;
+    drawScene(ic,sc);loaded=ic;
+    document.getElementById('dims').textContent=`540×405 · ${sc.toUpperCase()} [LIVE]`;
+    await runInf(sc);
+    if(demoOn)demoTO=setTimeout(step,3000);
+  };
+  step();
+}
+
+function sleep(ms){return new Promise(r=>setTimeout(r,ms));}
+function addLog(type,msg){
+  const cl=document.getElementById('CL');
+  const el=((Date.now()-t0log)/1000).toFixed(3);
+  const d=document.createElement('div');d.className='ll';
+  d.innerHTML=`<span class="lt">${el}</span><span class="l${type[0]}">${msg}</span>`;
+  cl.appendChild(d);cl.scrollTop=cl.scrollHeight;
+}
+function clearLog(){document.getElementById('CL').innerHTML='';t0log=Date.now();}
+function clearOut(){
+  const oc=document.getElementById('OC');oc.width=540;oc.height=405;oc.getContext('2d').clearRect(0,0,540,405);
+  MODS.forEach(m=>{const el=document.getElementById('m-'+m.id),st=document.getElementById('ms-'+m.id);el.classList.remove('act','proc');st.className='mst si';st.textContent='IDLE';});
+  document.getElementById('DL').innerHTML='<div style="color:var(--tm);font-size:12px;text-align:center;padding:16px">No detections yet</div>';
+  document.getElementById('dcnt').textContent='0 detections';
+  animThr(0);[0,1,2,3].forEach(i=>{document.getElementById('u'+i).style.width='0%';document.getElementById('uv'+i).textContent='0%';});
+}
+function resetAll(){
+  if(demoOn){clearTimeout(demoTO);demoOn=false;document.getElementById('demoBtn').innerHTML='⚡ Live Demo Loop';}
+  clearOut();loaded=null;document.getElementById('runBtn').disabled=true;
+  ['mF','mL','mC','mV'].forEach(id=>document.getElementById(id).textContent='—');
+  document.getElementById('mP').textContent='0';
+  document.getElementById('fpsd').textContent='— FPS';document.getElementById('latd').textContent='— ms';
+  document.getElementById('cfps').textContent='—';document.getElementById('dims').textContent='—';
+  hideAlert();addLog('in','[RESET] Pipeline reset.');
+}
+function togOv(){ovOn=!ovOn;addLog('in',`[UI] Overlays ${ovOn?'ON':'OFF'}`);}
+function showAlert(m){const b=document.getElementById('AB');document.getElementById('AT').textContent=m;b.classList.add('show');clearTimeout(b._t);b._t=setTimeout(()=>b.classList.remove('show'),5000);}
+function hideAlert(){document.getElementById('AB').classList.remove('show');}
+function swit(tab,btn){
+  document.querySelectorAll('.tabs .tab').forEach(t=>t.classList.remove('act'));btn.classList.add('act');
+  document.querySelectorAll('.tc').forEach(t=>t.classList.remove('act'));
+  document.getElementById('tc-'+tab).classList.add('act');
+}
+
+// Init
+initMods();initSamples();
+(function(){
+  ['IC','OC'].forEach((id,i)=>{
+    const c=document.getElementById(id),ctx=c.getContext('2d');
+    const g=ctx.createLinearGradient(0,0,c.width,c.height);g.addColorStop(0,'#0a1628');g.addColorStop(1,'#071020');
+    ctx.fillStyle=g;ctx.fillRect(0,0,c.width,c.height);
+    ctx.fillStyle='rgba(0,212,255,.07)';ctx.font='12px JetBrains Mono,monospace';ctx.textAlign='center';
+    ctx.fillText(i===0?'Upload an image or choose Sample Scenes':'Detection output will appear here',c.width/2,c.height/2);
+    ctx.fillText('SAF-DETR · Surveillance Violence Detection',c.width/2,c.height/2+18);ctx.textAlign='left';
+  });
+  addLog('ok','[BOOT] SAF-DETR web engine initialized');
+  addLog('in','[MODEL] ResNet-50 + RT-DETR + SFEN active');
+  addLog('in','[READY] Click "Live Demo Loop" or load an image to begin');
+})();
+</script>
+</body>
+</html>

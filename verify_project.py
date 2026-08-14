@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-\"\"\"SAF-DETR Project Verification Script
+"""SAF-DETR Project Verification Script
 ======================================
 
 This script verifies the SAF-DETR project structure and runs basic tests
@@ -10,8 +10,7 @@ Usage:
 
 Options:
     --full    Run full integration tests (requires dependencies)
-\"\"\"
-
+"""
 
 import ast
 import sys
@@ -19,9 +18,14 @@ import os
 from pathlib import Path
 from typing import List, Tuple, Dict
 
+if hasattr(sys.stdout, 'reconfigure'):
+    sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+if hasattr(sys.stderr, 'reconfigure'):
+    sys.stderr.reconfigure(encoding='utf-8', errors='replace')
+
 
 class ProjectVerifier:
-    \"\"\"Verifies SAF-DETR project structure and code validity.\"\"\"
+    """Verifies SAF-DETR project structure and code validity."""
 
     def __init__(self, project_root: str = "."):
         self.project_root = Path(project_root).resolve()
@@ -42,7 +46,7 @@ class ProjectVerifier:
         print(f"  ✓ {msg}")
 
     def check_file_structure(self) -> bool:
-        \"\"\"Verify all required files exist.\"\"\"
+        """Verify all required files exist."""
         print("\n📁 Checking File Structure...")
         
         required_files = [
@@ -73,12 +77,15 @@ class ProjectVerifier:
         return all_exist
 
     def check_python_syntax(self) -> bool:
-        \"\"\"Verify all Python files have valid syntax.\"\"\"\n        print("\n🐍 Checking Python Syntax...")
+        """Verify all Python files have valid syntax."""
+        print("\n🐍 Checking Python Syntax...")
         
         python_files = list(self.project_root.rglob("*.py"))
         all_valid = True
 
         for py_file in python_files:
+            if "venv" in str(py_file) or ".git" in str(py_file):
+                continue
             try:
                 with open(py_file, 'r', encoding='utf-8') as f:
                     source = f.read()
@@ -97,9 +104,9 @@ class ProjectVerifier:
         return all_valid
 
     def check_imports(self) -> bool:
-        \"\"\"Check if imports are properly structured.\"\"\"\n        print("\n📦 Checking Import Structure...")
+        """Check if imports are properly structured."""
+        print("\n📦 Checking Import Structure...")
         
-        # Check for circular imports by attempting to parse imports
         init_file = self.project_root / "models" / "SAF_DETR" / "__init__.py"
         if init_file.exists():
             self.log_success("models/SAF_DETR/__init__.py exists")
@@ -109,7 +116,8 @@ class ProjectVerifier:
         return True
 
     def check_dependencies(self) -> bool:
-        \"\"\"Check if required dependencies are available.\"\"\"\n        print("\n📋 Checking Dependencies...")
+        """Check if required dependencies are available."""
+        print("\n📋 Checking Dependencies...")
         
         required_packages = [
             "torch",
@@ -117,7 +125,6 @@ class ProjectVerifier:
             "numpy",
             "cv2",
             "PIL",
-            "timm",
             "tqdm",
         ]
 
@@ -126,6 +133,7 @@ class ProjectVerifier:
             "fastapi",
             "uvicorn",
             "wandb",
+            "timm",
         ]
 
         all_available = True
@@ -153,13 +161,12 @@ class ProjectVerifier:
         return all_available
 
     def run_basic_tests(self) -> bool:
-        \"\"\"Run basic functionality tests.\"\"\"\n        print("\n🧪 Running Basic Tests...")
+        """Run basic functionality tests."""
+        print("\n🧪 Running Basic Tests...")
         
         try:
-            # Test 1: Import modules
             sys.path.insert(0, str(self.project_root))
             
-            # Check if we can import the modules
             modules_to_test = [
                 "models.SAF_DETR.adaptive_intelligence",
                 "models.SAF_DETR.temporal_memory",
@@ -181,12 +188,12 @@ class ProjectVerifier:
             return False
 
     def check_model_structure(self) -> bool:
-        \"\"\"Verify model structure is correct.\"\"\"\n        print("\n🏗️  Checking Model Structure...")
+        """Verify model structure is correct."""
+        print("\n🏗️  Checking Model Structure...")
         
-        # Check complete_model.py for key components
         complete_model = self.project_root / "models" / "SAF_DETR" / "complete_model.py"
         if complete_model.exists():
-            with open(complete_model, 'r') as f:
+            with open(complete_model, 'r', encoding='utf-8') as f:
                 content = f.read()
             
             required_components = [
@@ -207,7 +214,8 @@ class ProjectVerifier:
         return True
 
     def generate_report(self) -> Dict:
-        \"\"\"Generate verification report.\"\"\"\n        print("\n" + "="*60)
+        """Generate verification report."""
+        print("\n" + "="*60)
         print("📊 VERIFICATION REPORT")
         print("="*60)
         
@@ -229,7 +237,8 @@ class ProjectVerifier:
             return {"status": "success", "errors": self.errors, "warnings": self.warnings}
 
     def run_all_checks(self, full: bool = False) -> Dict:
-        \"\"\"Run all verification checks.\"\"\"\n        print("="*60)
+        """Run all verification checks."""
+        print("="*60)
         print("🔍 SAF-DETR PROJECT VERIFICATION")
         print("="*60)
         print(f"Project Root: {self.project_root}")
@@ -257,7 +266,8 @@ class ProjectVerifier:
 
 
 def print_usage_instructions():
-    \"\"\"Print instructions on how to run the project.\"\"\"\n    print("\n" + "="*60)
+    """Print instructions on how to run the project."""
+    print("\n" + "="*60)
     print("📖 HOW TO RUN SAF-DETR")
     print("="*60)
     
@@ -269,59 +279,33 @@ def print_usage_instructions():
    # Optional for deployment
    pip install streamlit fastapi uvicorn
 
-2. TRAIN THE MODEL:
-   ---------------
-   cd SAF_DETR_Project
+2. RUN REAL-TIME WEBCAM / CAMERA VIOLENCE PREDICTION:
+   -------------------------------------------------
+   python live_predict.py --source 0
    
-   # Prepare your dataset in the following structure:
-   data/
-   ├── train/
-   │   ├── images/
-   │   └── annotations.json
-   └── val/
-       ├── images/
-       └── annotations.json
-   
-   # Run training
-   python training/train.py
+   # Or run on video file
+   python live_predict.py --source path/to/video.mp4
 
-3. RUN WEB DEMO:
+3. TRAIN ON MIXED DATASETS (RWF-2000, UCF-Crime, Custom):
+   -----------------------------------------------------
+   python training/train_mixed.py --data_dir data/
+
+4. RUN WEB DEMO:
    -------------
-   cd SAF_DETR_Project
-   
-   # Start Streamlit app
+   # Open demo/index.html in any browser, or:
    streamlit run deployment/app.py
-   
-   # Or use FastAPI
-   uvicorn deployment.api:app --reload
-
-4. PROJECT STRUCTURE:
-   ----------------
-   SAF_DETR_Project/
-   ├── models/SAF_DETR/       # Core model modules
-   ├── training/              # Training scripts
-   ├── evaluation/            # Evaluation scripts
-   ├── deployment/            # Web apps and API
-   └── checkpoints/           # Saved model weights
-
-5. KEY FEATURES:
-   ------------
-   ✓ Adaptive Image Intelligence - Auto-enhances low-quality footage
-   ✓ Temporal Memory - Maintains consistency across frames
-   ✓ Novel Pipeline - Uncertainty quantification & progressive refinement
-   ✓ Real-time Performance - 25-30 FPS on RTX 4070
     """)
 
 
 def main():
-    \"\"\"Main entry point.\"\"\"\n    full_check = "--full" in sys.argv
+    """Main entry point."""
+    full_check = "--full" in sys.argv
     
     verifier = ProjectVerifier()
     result = verifier.run_all_checks(full=full_check)
     
     print_usage_instructions()
     
-    # Return exit code
     if result["status"] == "failed":
         sys.exit(1)
     else:

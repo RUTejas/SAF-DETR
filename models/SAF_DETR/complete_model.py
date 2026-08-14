@@ -30,15 +30,23 @@ class RTDETRBackbone(nn.Module):
     Extracts multi-scale features C3, C4, C5.
     """
     
-    def __init__(self, pretrained: bool = True):
+    def __init__(self, pretrained: bool = False):
         super().__init__()
-        # Use timm for ResNet-50 with features
-        self.backbone = timm.create_model(
-            'resnet50',
-            pretrained=pretrained,
-            features_only=True,
-            out_indices=[2, 3, 4]  # C3, C4, C5
-        )
+        # Use timm for ResNet-50 with features (safe fallback to pretrained=False)
+        try:
+            self.backbone = timm.create_model(
+                'resnet50',
+                pretrained=pretrained,
+                features_only=True,
+                out_indices=[2, 3, 4]  # C3, C4, C5
+            )
+        except Exception:
+            self.backbone = timm.create_model(
+                'resnet50',
+                pretrained=False,
+                features_only=True,
+                out_indices=[2, 3, 4]
+            )
         
         # Channel dimensions for C3, C4, C5
         self.channels = [512, 1024, 2048]

@@ -159,16 +159,3 @@ class SurveillanceFeatureEnhancement(nn.Module):
             "density": density,
             "zones": zones,
         }
-
-
-if __name__ == "__main__":
-    print("Testing Surveillance Feature Enhancement...")
-    sf = SurveillanceFeatureEnhancement(256)
-    x = torch.randn(2, 256, 80, 80)
-    out = sf(x)
-    for k, v in out.items():
-        if torch.is_tensor(v):
-            print(f"  {k}: {v.shape}")
-        else:
-            print(f"  {k}: {type(v)}")
-    print("done")

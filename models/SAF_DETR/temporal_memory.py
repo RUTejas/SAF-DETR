@@ -271,7 +271,7 @@ class TrackMatcher(nn.Module):
         
         # Motion compatibility network
         self.motion_compat = nn.Sequential(
-            nn.Linear(8, 64),  # 4 bbox + 4 velocity
+            nn.Linear(12, 64),  # 4 det + 4 predicted_bbox + 4 velocity
             nn.ReLU(),
             nn.Linear(64, 32),
             nn.ReLU(),

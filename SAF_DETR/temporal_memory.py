@@ -1,1 +1,644 @@
-\"\"\"\nSAF-DETR: Temporal Detection Memory Module\n============================================\n\nThis module maintains temporal consistency across frames for stable detection\nand tracking in surveillance videos.\n\nAuthor: SAF-DETR Research Team\nDate: 2026\n\"\"\"\n\nimport torch\nimport torch.nn as nn\nimport torch.nn.functional as F\nfrom typing import Dict, List, Optional, Tuple\nfrom collections import deque\nimport numpy as np\n\n\nclass TrackState:\n    \"\"\"\n    Represents the state of a tracked object.\n    \"\"\"\n    \n    def __init__(self, \n                 track_id: int,\n                 bbox: torch.Tensor,\n                 features: torch.Tensor,\n                 confidence: float,\n                 frame_id: int,\n                 max_history: int = 30):\n        \"\"\"\n        Args:\n            track_id: Unique track identifier\n            bbox: Bounding box [4] (x1, y1, x2, y2)\n            features: Appearance features [D]\n            confidence: Detection confidence\n            frame_id: Current frame ID\n            max_history: Maximum history length\n        \"\"\"\n        self.track_id = track_id\n        self.bbox_history = deque([bbox], maxlen=max_history)\n        self.feature_history = deque([features], maxlen=max_history)\n        self.confidence_history = deque([confidence], maxlen=max_history)\n        self.frame_ids = deque([frame_id], maxlen=max_history)\n        \n        # Motion state\n        self.velocity = torch.zeros(4)  # (vx1, vy1, vx2, vy2)\n        self.acceleration = torch.zeros(4)\n        \n        # Track status\n        self.missed_frames = 0\n        self.max_missed = 5\n        self.is_active = True\n        \n    def update(self, \n               bbox: torch.Tensor, \n               features: torch.Tensor, \n               confidence: float,\n               frame_id: int):\n        \"\"\"Update track state with new detection.\"\"\"\n        # Calculate velocity\n        if len(self.bbox_history) > 0:\n            dt = frame_id - self.frame_ids[-1]\n            if dt > 0:\n                new_velocity = (bbox - self.bbox_history[-1]) / dt\n                self.acceleration = (new_velocity - self.velocity) / dt\n                self.velocity = new_velocity\n        \n        # Update history\n        self.bbox_history.append(bbox)\n        self.feature_history.append(features)\n        self.confidence_history.append(confidence)\n        self.frame_ids.append(frame_id)\n        \n        # Reset missed frames\n        self.missed_frames = 0\n        self.is_active = True\n        \n    def predict(self, frame_id: int) -> torch.Tensor:\n        \"\"\"Predict bbox at given frame using motion model.\"\"\"\n        dt = frame_id - self.frame_ids[-1]\n        \n        # Constant acceleration motion model\n        predicted = (self.bbox_history[-1] + \n                    self.velocity * dt + \n                    0.5 * self.acceleration * dt * dt)\n        \n        return predicted\n    \n    def mark_missed(self):\n        \"\"\"Mark track as missed in current frame.\"\"\"\n        self.missed_frames += 1\n        if self.missed_frames > self.max_missed:\n            self.is_active = False\n    \n    def get_smoothed_bbox(self, window_size: int = 3) -> torch.Tensor:\n        \"\"\"Get temporally smoothed bounding box.\"\"\"\n        if len(self.bbox_history) < window_size:\n            return self.bbox_history[-1]\n        \n        # Average over recent history\n        recent_bboxes = list(self.bbox_history)[-window_size:]\n        smoothed = torch.stack(recent_bboxes).mean(dim=0)\n        \n        return smoothed\n    \n    def get_feature_consistency(self) -> float:\n        \"\"\"Calculate feature consistency score.\"\"\"\n        if len(self.feature_history) < 2:\n            return 1.0\n        \n        # Cosine similarity between recent features\n        recent_features = list(self.feature_history)[-5:]\n        similarities = []\n        \n        for i in range(len(recent_features) - 1):\n            sim = F.cosine_similarity(\n                recent_features[i].unsqueeze(0),\n                recent_features[i + 1].unsqueeze(0)\n            )\n            similarities.append(sim.item())\n        \n        return np.mean(similarities) if similarities else 1.0\n\n\nclass TemporalFeatureAggregator(nn.Module):\n    \"\"\"\n    Aggregates features across time using attention mechanism.\n    \"\"\"\n    \n    def __init__(self, feature_dim: int = 256, num_frames: int = 5):\n        super().__init__()\n        self.feature_dim = feature_dim\n        self.num_frames = num_frames\n        \n        # Temporal attention\n        self.temporal_attention = nn.MultiheadAttention(\n            embed_dim=feature_dim,\n            num_heads=8,\n            batch_first=True\n        )\n        \n        # Temporal encoding\n        self.temporal_encoding = nn.Parameter(\n            torch.randn(num_frames, feature_dim)\n        )\n        \n        # Feature fusion\n        self.fusion = nn.Sequential(\n            nn.Linear(feature_dim * 2, feature_dim),\n            nn.ReLU(),\n            nn.Linear(feature_dim, feature_dim)\n        )\n        \n    def forward(self, \n                current_features: torch.Tensor,\n                temporal_features: List[torch.Tensor]) -> torch.Tensor:\n        \"\"\"\n        Args:\n            current_features: Current frame features [N, D]\n            temporal_features: List of previous frame features\n            \n        Returns:\n            Aggregated features [N, D]\n        \"\"\"\n        if len(temporal_features) == 0:\n            return current_features\n        \n        # Stack temporal features\n        temporal_stack = torch.stack(temporal_features[-self.num_frames:], dim=1)\n        \n        # Add temporal encoding\n        temporal_stack = temporal_stack + self.temporal_encoding[:temporal_stack.size(1)]\n        \n        # Apply temporal attention\n        aggregated, _ = self.temporal_attention(\n            current_features.unsqueeze(1),\n            temporal_stack,\n            temporal_stack\n        )\n        aggregated = aggregated.squeeze(1)\n        \n        # Fuse with current features\n        combined = torch.cat([current_features, aggregated], dim=1)\n        output = self.fusion(combined)\n        \n        return output\n\n\nclass DetectionStabilizer(nn.Module):\n    \"\"\"\n    Stabilizes detections across frames using temporal information.\n    \"\"\"\n    \n    def __init__(self, \n                 feature_dim: int = 256,\n                 temporal_window: int = 5,\n                 stability_threshold: float = 0.5):\n        super().__init__()\n        self.feature_dim = feature_dim\n        self.temporal_window = temporal_window\n        self.stability_threshold = stability_threshold\n        \n        # Temporal aggregator\n        self.temporal_aggregator = TemporalFeatureAggregator(feature_dim, temporal_window)\n        \n        # Stability predictor\n        self.stability_net = nn.Sequential(\n            nn.Linear(feature_dim * 2 + 4, 128),  # features + bbox\n            nn.ReLU(),\n            nn.Linear(128, 64),\n            nn.ReLU(),\n            nn.Linear(64, 1),\n            nn.Sigmoid()\n        )\n        \n    def forward(self,\n                detections: torch.Tensor,\n                features: torch.Tensor,\n                temporal_features: Optional[List[torch.Tensor]] = None) -> Tuple[torch.Tensor, torch.Tensor]:\n        \"\"\"\n        Args:\n            detections: Current detections [N, 4] (x1, y1, x2, y2)\n            features: Current features [N, D]\n            temporal_features: Optional temporal feature history\n            \n        Returns:\n            stabilized_detections: Stabilized detections [N, 4]\n            stability_scores: Stability confidence [N, 1]\n        \"\"\"\n        # Aggregate temporal features\n        if temporal_features is not None and len(temporal_features) > 0:\n            aggregated_features = self.temporal_aggregator(features, temporal_features)\n        else:\n            aggregated_features = features\n        \n        # Calculate stability scores\n        combined = torch.cat([features, aggregated_features, detections], dim=1)\n        stability_scores = self.stability_net(combined)\n        \n        # Stabilize detections (smooth with temporal information)\n        stabilized = detections  # Placeholder for actual smoothing\n        \n        return stabilized, stability_scores\n\n\nclass TrackMatcher(nn.Module):\n    \"\"\"\n    Matches detections to existing tracks using appearance and motion cues.\n    \"\"\"\n    \n    def __init__(self,\n                 feature_dim: int = 256,\n                 appearance_weight: float = 0.7,\n                 motion_weight: float = 0.3):\n        super().__init__()\n        self.feature_dim = feature_dim\n        self.appearance_weight = appearance_weight\n        self.motion_weight = motion_weight\n        \n        # Appearance similarity network\n        self.appearance_sim = nn.Sequential(\n            nn.Linear(feature_dim * 2, 256),\n            nn.ReLU(),\n            nn.Linear(256, 128),\n            nn.ReLU(),\n            nn.Linear(128, 1),\n            nn.Sigmoid()\n        )\n        \n        # Motion compatibility network\n        self.motion_compat = nn.Sequential(\n            nn.Linear(8, 64),  # 4 bbox + 4 velocity\n            nn.ReLU(),\n            nn.Linear(64, 32),\n            nn.ReLU(),\n            nn.Linear(32, 1),\n            nn.Sigmoid()\n        )\n        \n    def compute_affinity_matrix(self,\n                               detections: torch.Tensor,\n                               det_features: torch.Tensor,\n                               tracks: List[TrackState],\n                               frame_id: int) -> torch.Tensor:\n        \"\"\"\n        Compute affinity matrix between detections and tracks.\n        \n        Args:\n            detections: Current detections [N, 4]\n            det_features: Detection features [N, D]\n            tracks: List of track states\n            frame_id: Current frame ID\n            \n        Returns:\n            Affinity matrix [N, M] where M is number of tracks\n        \"\"\"\n        if len(tracks) == 0:\n            return torch.zeros(len(detections), 0)\n        \n        N = len(detections)\n        M = len(tracks)\n        \n        affinity_matrix = torch.zeros(N, M)\n        \n        for i, (det, det_feat) in enumerate(zip(detections, det_features)):\n            for j, track in enumerate(tracks):\n                if not track.is_active:\n                    continue\n                \n                # Appearance similarity\n                track_feat = track.feature_history[-1]\n                app_input = torch.cat([det_feat, track_feat])\n                app_sim = self.appearance_sim(app_input)\n                \n                # Motion compatibility\n                predicted_bbox = track.predict(frame_id)\n                motion_input = torch.cat([det, predicted_bbox, track.velocity])\n                motion_sim = self.motion_compat(motion_input)\n                \n                # Combined affinity\n                affinity = (self.appearance_weight * app_sim + \n                           self.motion_weight * motion_sim)\n                \n                # IoU penalty\n                iou = self.compute_iou(det.unsqueeze(0), predicted_bbox.unsqueeze(0))\n                affinity = affinity * iou\n                \n                affinity_matrix[i, j] = affinity\n        \n        return affinity_matrix\n    \n    @staticmethod\n    def compute_iou(boxes1: torch.Tensor, boxes2: torch.Tensor) -> torch.Tensor:\n        \"\"\"Compute IoU between two sets of boxes.\"\"\"\n        # boxes: [N, 4] (x1, y1, x2, y2)\n        area1 = (boxes1[:, 2] - boxes1[:, 0]) * (boxes1[:, 3] - boxes1[:, 1])\n        area2 = (boxes2[:, 2] - boxes2[:, 0]) * (boxes2[:, 3] - boxes2[:, 1])\n        \n        inter_x1 = torch.max(boxes1[:, 0], boxes2[:, 0])\n        inter_y1 = torch.max(boxes1[:, 1], boxes2[:, 1])\n        inter_x2 = torch.min(boxes1[:, 2], boxes2[:, 2])\n        inter_y2 = torch.min(boxes1[:, 3], boxes2[:, 3])\n        \n        inter_area = torch.clamp(inter_x2 - inter_x1, min=0) * torch.clamp(inter_y2 - inter_y1, min=0)\n        \n        union_area = area1 + area2 - inter_area\n        iou = inter_area / (union_area + 1e-6)\n        \n        return iou\n\n\nclass TemporalDetectionMemory(nn.Module):\n    \"\"\"\n    Complete Temporal Detection Memory module.\n    \n    Maintains temporal consistency for detections and tracks objects across frames.\n    \"\"\"\n    \n    def __init__(self,\n                 feature_dim: int = 256,\n                 max_tracks: int = 100,\n                 temporal_window: int = 5,\n                 match_threshold: float = 0.5):\n        super().__init__()\n        self.feature_dim = feature_dim\n        self.max_tracks = max_tracks\n        self.temporal_window = temporal_window\n        self.match_threshold = match_threshold\n        \n        # Components\n        self.stabilizer = DetectionStabilizer(feature_dim, temporal_window)\n        self.matcher = TrackMatcher(feature_dim)\n        \n        # Track management\n        self.tracks: Dict[int, TrackState] = {}\n        self.next_track_id = 0\n        self.frame_id = 0\n        \n        # Feature history for temporal aggregation\n        self.feature_history: List[torch.Tensor] = []\n        \n    def forward(self,\n                detections: torch.Tensor,\n                features: torch.Tensor,\n                scores: torch.Tensor) -> Dict[str, torch.Tensor]:\n        \"\"\"\n        Process detections with temporal consistency.\n        \n        Args:\n            detections: Detection boxes [N, 4] (x1, y1, x2, y2)\n            features: Detection features [N, D]\n            scores: Detection confidence scores [N]\n            \n        Returns:\n            Dictionary containing:\n                - stabilized_detections: Stabilized boxes [N, 4]\n                - track_ids: Track IDs for each detection [N]\n                - temporal_consistency: Consistency scores [N]\n                - active_tracks: Number of active tracks\n        \"\"\"\n        self.frame_id += 1\n        \n        # Stabilize detections\n        stabilized, stability_scores = self.stabilizer(\n            detections, features, self.feature_history\n        )\n        \n        # Update feature history\n        self.feature_history.append(features)\n        if len(self.feature_history) > self.temporal_window:\n            self.feature_history.pop(0)\n        \n        # Match detections to tracks\n        track_list = list(self.tracks.values())\n        affinity_matrix = self.matcher.compute_affinity_matrix(\n            stabilized, features, track_list, self.frame_id\n        )\n        \n        # Hungarian matching\n        track_ids = self._assign_tracks(affinity_matrix, stabilized, features, scores)\n        \n        # Calculate temporal consistency\n        temporal_consistency = self._compute_consistency(track_ids)\n        \n        # Clean up old tracks\n        self._cleanup_tracks()\n        \n        return {\n            'stabilized_detections': stabilized,\n            'track_ids': track_ids,\n            'temporal_consistency': temporal_consistency,\n            'stability_scores': stability_scores,\n            'active_tracks': len([t for t in self.tracks.values() if t.is_active])\n        }\n    \n    def _assign_tracks(self,\n                      affinity_matrix: torch.Tensor,\n                      detections: torch.Tensor,\n                      features: torch.Tensor,\n                      scores: torch.Tensor) -> torch.Tensor:\n        \"\"\"Assign detections to tracks using Hungarian algorithm.\"\"\"\n        N = len(detections)\n        track_ids = torch.full((N,), -1, dtype=torch.long)\n        \n        if affinity_matrix.numel() == 0:\n            # No existing tracks, create new ones\n            for i in range(N):\n                track_id = self._create_track(detections[i], features[i], scores[i])\n                track_ids[i] = track_id\n            return track_ids\n        \n        # Simple greedy matching (can be replaced with Hungarian algorithm)\n        matched_tracks = set()\n        \n        for i in range(N):\n            if affinity_matrix.size(1) > 0:\n                best_match = affinity_matrix[i].argmax()\n                best_score = affinity_matrix[i, best_match]\n                \n                if best_score > self.match_threshold and best_match not in matched_tracks:\n                    # Update existing track\n                    track_id = list(self.tracks.keys())[best_match]\n                    self.tracks[track_id].update(\n                        detections[i], features[i], scores[i], self.frame_id\n                    )\n                    track_ids[i] = track_id\n                    matched_tracks.add(best_match)\n                else:\n                    # Create new track\n                    track_id = self._create_track(detections[i], features[i], scores[i])\n                    track_ids[i] = track_id\n            else:\n                # Create new track\n                track_id = self._create_track(detections[i], features[i], scores[i])\n                track_ids[i] = track_id\n        \n        # Mark unmatched tracks as missed\n        for idx, track in enumerate(self.tracks.values()):\n            if idx not in matched_tracks:\n                track.mark_missed()\n        \n        return track_ids\n    \n    def _create_track(self, \n                     bbox: torch.Tensor, \n                     features: torch.Tensor, \n                     confidence: float) -> int:\n        \"\"\"Create a new track.\"\"\"\n        track_id = self.next_track_id\n        self.tracks[track_id] = TrackState(\n            track_id, bbox, features, confidence, self.frame_id\n        )\n        self.next_track_id += 1\n        return track_id\n    \n    def _compute_consistency(self, track_ids: torch.Tensor) -> torch.Tensor:\n        \"\"\"Compute temporal consistency scores.\"\"\"\n        consistency = torch.ones(len(track_ids))\n        \n        for i, track_id in enumerate(track_ids):\n            if track_id >= 0 and track_id in self.tracks:\n                track = self.tracks[track_id]\n                # Higher consistency for tracks with longer history\n                consistency[i] = min(len(track.bbox_history) / 5, 1.0)\n        \n        return consistency\n    \n    def _cleanup_tracks(self):\n        \"\"\"Remove old inactive tracks.\"\"\"\n        inactive = [tid for tid, track in self.tracks.items() if not track.is_active]\n        for tid in inactive:\n            del self.tracks[tid]\n        \n        # Limit total tracks\n        if len(self.tracks) > self.max_tracks:\n            # Remove oldest tracks\n            sorted_tracks = sorted(self.tracks.items(), \n                                 key=lambda x: x[1].frame_ids[-1])\n            for tid, _ in sorted_tracks[:-self.max_tracks]:\n                del self.tracks[tid]\n    \n    def get_track_info(self) -> Dict[str, any]:\n        \"\"\"Get information about current tracks.\"\"\"\n        active = [t for t in self.tracks.values() if t.is_active]\n        return {\n            'num_active_tracks': len(active),\n            'num_total_tracks': len(self.tracks),\n            'average_track_length': np.mean([len(t.bbox_history) for t in active]) if active else 0,\n            'frame_id': self.frame_id\n        }\n    \n    def reset(self):\n        \"\"\"Reset temporal memory.\"\"\"\n        self.tracks.clear()\n        self.feature_history.clear()\n        self.next_track_id = 0\n        self.frame_id = 0\n\n\nclass TemporalConsistencyLoss(nn.Module):\n    \"\"\"\n    Loss function for temporal consistency in detection.\n    \"\"\"\n    \n    def __init__(self, \n                 temporal_weight: float = 1.0,\n                 smoothness_weight: float = 0.5):\n        super().__init__()\n        self.temporal_weight = temporal_weight\n        self.smoothness_weight = smoothness_weight\n        \n    def forward(self,\n                current_detections: torch.Tensor,\n                previous_detections: torch.Tensor,\n                track_ids: torch.Tensor) -> torch.Tensor:\n        \"\"\"\n        Compute temporal consistency loss.\n        \n        Args:\n            current_detections: Current frame detections [N, 4]\n            previous_detections: Previous frame detections [M, 4]\n            track_ids: Track IDs linking current to previous [N]\n            \n        Returns:\n            Temporal consistency loss\n        \"\"\"\n        if len(previous_detections) == 0 or track_ids.numel() == 0:\n            return torch.tensor(0.0, device=current_detections.device)\n        \n        # Find matched detections\n        temporal_loss = 0.0\n        num_matches = 0\n        \n        for i, track_id in enumerate(track_ids):\n            if track_id >= 0 and track_id < len(previous_detections):\n                # L2 distance between current and previous\n                diff = current_detections[i] - previous_detections[track_id]\n                temporal_loss += torch.norm(diff)\n                num_matches += 1\n        \n        if num_matches > 0:\n            temporal_loss = temporal_loss / num_matches\n        \n        # Smoothness loss (encourage smooth motion)\n        smoothness_loss = 0.0\n        if len(current_detections) > 1:\n            # Penalize large changes in box size/aspect ratio\n            widths = current_detections[:, 2] - current_detections[:, 0]\n            heights = current_detections[:, 3] - current_detections[:, 1]\n            aspect_ratios = widths / (heights + 1e-6)\n            \n            smoothness_loss = torch.var(aspect_ratios)\n        \n        total_loss = (self.temporal_weight * temporal_loss + \n                     self.smoothness_weight * smoothness_loss)\n        \n        return total_loss\n\n\nif __name__ == \"__main__\":\n    # Test the module\n    print(\"Testing Temporal Detection Memory Module...\")\n    \n    # Create module\n    module = TemporalDetectionMemory(feature_dim=256)\n    \n    # Simulate multiple frames\n    for frame_idx in range(10):\n        # Random detections\n        num_detections = torch.randint(3, 8, (1,)).item()\n        detections = torch.randn(num_detections, 4).clamp(0, 1)\n        detections[:, 2:] += detections[:, :2]  # Ensure x2 > x1, y2 > y1\n        \n        features = torch.randn(num_detections, 256)\n        scores = torch.rand(num_detections)\n        \n        # Forward pass\n        output = module(detections, features, scores)\n        \n        print(f\"\\nFrame {frame_idx + 1}:\")\n        print(f\"  Detections: {num_detections}\")\n        print(f\"  Active tracks: {output['active_tracks']}\")\n        print(f\"  Avg consistency: {output['temporal_consistency'].mean():.3f}\")\n    \n    # Track info\n    info = module.get_track_info()\n    print(f\"\\nFinal Track Info: {info}\")\n    \n    # Test temporal loss\n    print(\"\\nTesting Temporal Consistency Loss...\")\n    loss_fn = TemporalConsistencyLoss()\n    current = torch.randn(5, 4).clamp(0, 1)\n    previous = torch.randn(5, 4).clamp(0, 1)\n    track_ids = torch.tensor([0, 1, 2, 3, 4])\n    loss = loss_fn(current, previous, track_ids)\n    print(f\"Temporal loss: {loss.item():.4f}\")\n    \n    print(\"\\n✓ Temporal Detection Memory Module test passed!\")\n
+"""
+SAF-DETR: Temporal Detection Memory Module
+============================================
+
+This module maintains temporal consistency across frames for stable detection
+and tracking in surveillance videos.
+
+Author: SAF-DETR Research Team
+Date: 2026
+"""
+
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from typing import Dict, List, Optional, Tuple
+from collections import deque
+import numpy as np
+
+
+class TrackState:
+    """
+    Represents the state of a tracked object.
+    """
+    
+    def __init__(self, 
+                 track_id: int,
+                 bbox: torch.Tensor,
+                 features: torch.Tensor,
+                 confidence: float,
+                 frame_id: int,
+                 max_history: int = 30):
+        """
+        Args:
+            track_id: Unique track identifier
+            bbox: Bounding box [4] (x1, y1, x2, y2)
+            features: Appearance features [D]
+            confidence: Detection confidence
+            frame_id: Current frame ID
+            max_history: Maximum history length
+        """
+        self.track_id = track_id
+        self.bbox_history = deque([bbox], maxlen=max_history)
+        self.feature_history = deque([features], maxlen=max_history)
+        self.confidence_history = deque([confidence], maxlen=max_history)
+        self.frame_ids = deque([frame_id], maxlen=max_history)
+        
+        # Motion state
+        self.velocity = torch.zeros(4)  # (vx1, vy1, vx2, vy2)
+        self.acceleration = torch.zeros(4)
+        
+        # Track status
+        self.missed_frames = 0
+        self.max_missed = 5
+        self.is_active = True
+        
+    def update(self, 
+               bbox: torch.Tensor, 
+               features: torch.Tensor, 
+               confidence: float,
+               frame_id: int):
+        """Update track state with new detection."""
+        # Calculate velocity
+        if len(self.bbox_history) > 0:
+            dt = frame_id - self.frame_ids[-1]
+            if dt > 0:
+                new_velocity = (bbox - self.bbox_history[-1]) / dt
+                self.acceleration = (new_velocity - self.velocity) / dt
+                self.velocity = new_velocity
+        
+        # Update history
+        self.bbox_history.append(bbox)
+        self.feature_history.append(features)
+        self.confidence_history.append(confidence)
+        self.frame_ids.append(frame_id)
+        
+        # Reset missed frames
+        self.missed_frames = 0
+        self.is_active = True
+        
+    def predict(self, frame_id: int) -> torch.Tensor:
+        """Predict bbox at given frame using motion model."""
+        dt = frame_id - self.frame_ids[-1]
+        
+        # Constant acceleration motion model
+        predicted = (self.bbox_history[-1] + 
+                    self.velocity * dt + 
+                    0.5 * self.acceleration * dt * dt)
+        
+        return predicted
+    
+    def mark_missed(self):
+        """Mark track as missed in current frame."""
+        self.missed_frames += 1
+        if self.missed_frames > self.max_missed:
+            self.is_active = False
+    
+    def get_smoothed_bbox(self, window_size: int = 3) -> torch.Tensor:
+        """Get temporally smoothed bounding box."""
+        if len(self.bbox_history) < window_size:
+            return self.bbox_history[-1]
+        
+        # Average over recent history
+        recent_bboxes = list(self.bbox_history)[-window_size:]
+        smoothed = torch.stack(recent_bboxes).mean(dim=0)
+        
+        return smoothed
+    
+    def get_feature_consistency(self) -> float:
+        """Calculate feature consistency score."""
+        if len(self.feature_history) < 2:
+            return 1.0
+        
+        # Cosine similarity between recent features
+        recent_features = list(self.feature_history)[-5:]
+        similarities = []
+        
+        for i in range(len(recent_features) - 1):
+            sim = F.cosine_similarity(
+                recent_features[i].unsqueeze(0),
+                recent_features[i + 1].unsqueeze(0)
+            )
+            similarities.append(sim.item())
+        
+        return np.mean(similarities) if similarities else 1.0
+
+
+class TemporalFeatureAggregator(nn.Module):
+    """
+    Aggregates features across time using attention mechanism.
+    """
+    
+    def __init__(self, feature_dim: int = 256, num_frames: int = 5):
+        super().__init__()
+        self.feature_dim = feature_dim
+        self.num_frames = num_frames
+        
+        # Temporal attention
+        self.temporal_attention = nn.MultiheadAttention(
+            embed_dim=feature_dim,
+            num_heads=8,
+            batch_first=True
+        )
+        
+        # Temporal encoding
+        self.temporal_encoding = nn.Parameter(
+            torch.randn(num_frames, feature_dim)
+        )
+        
+        # Feature fusion
+        self.fusion = nn.Sequential(
+            nn.Linear(feature_dim * 2, feature_dim),
+            nn.ReLU(),
+            nn.Linear(feature_dim, feature_dim)
+        )
+        
+    def forward(self, 
+                current_features: torch.Tensor,
+                temporal_features: List[torch.Tensor]) -> torch.Tensor:
+        """
+        Args:
+            current_features: Current frame features [N, D]
+            temporal_features: List of previous frame features
+            
+        Returns:
+            Aggregated features [N, D]
+        """
+        if len(temporal_features) == 0:
+            return current_features
+        
+        # Stack temporal features
+        temporal_stack = torch.stack(temporal_features[-self.num_frames:], dim=1)
+        
+        # Add temporal encoding
+        temporal_stack = temporal_stack + self.temporal_encoding[:temporal_stack.size(1)]
+        
+        # Apply temporal attention
+        aggregated, _ = self.temporal_attention(
+            current_features.unsqueeze(1),
+            temporal_stack,
+            temporal_stack
+        )
+        aggregated = aggregated.squeeze(1)
+        
+        # Fuse with current features
+        combined = torch.cat([current_features, aggregated], dim=1)
+        output = self.fusion(combined)
+        
+        return output
+
+
+class DetectionStabilizer(nn.Module):
+    """
+    Stabilizes detections across frames using temporal information.
+    """
+    
+    def __init__(self, 
+                 feature_dim: int = 256,
+                 temporal_window: int = 5,
+                 stability_threshold: float = 0.5):
+        super().__init__()
+        self.feature_dim = feature_dim
+        self.temporal_window = temporal_window
+        self.stability_threshold = stability_threshold
+        
+        # Temporal aggregator
+        self.temporal_aggregator = TemporalFeatureAggregator(feature_dim, temporal_window)
+        
+        # Stability predictor
+        self.stability_net = nn.Sequential(
+            nn.Linear(feature_dim * 2 + 4, 128),  # features + bbox
+            nn.ReLU(),
+            nn.Linear(128, 64),
+            nn.ReLU(),
+            nn.Linear(64, 1),
+            nn.Sigmoid()
+        )
+        
+    def forward(self,
+                detections: torch.Tensor,
+                features: torch.Tensor,
+                temporal_features: Optional[List[torch.Tensor]] = None) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Args:
+            detections: Current detections [N, 4] (x1, y1, x2, y2)
+            features: Current features [N, D]
+            temporal_features: Optional temporal feature history
+            
+        Returns:
+            stabilized_detections: Stabilized detections [N, 4]
+            stability_scores: Stability confidence [N, 1]
+        """
+        # Aggregate temporal features
+        if temporal_features is not None and len(temporal_features) > 0:
+            aggregated_features = self.temporal_aggregator(features, temporal_features)
+        else:
+            aggregated_features = features
+        
+        # Calculate stability scores
+        combined = torch.cat([features, aggregated_features, detections], dim=1)
+        stability_scores = self.stability_net(combined)
+        
+        # Stabilize detections (smooth with temporal information)
+        stabilized = detections  # Placeholder for actual smoothing
+        
+        return stabilized, stability_scores
+
+
+class TrackMatcher(nn.Module):
+    """
+    Matches detections to existing tracks using appearance and motion cues.
+    """
+    
+    def __init__(self,
+                 feature_dim: int = 256,
+                 appearance_weight: float = 0.7,
+                 motion_weight: float = 0.3):
+        super().__init__()
+        self.feature_dim = feature_dim
+        self.appearance_weight = appearance_weight
+        self.motion_weight = motion_weight
+        
+        # Appearance similarity network
+        self.appearance_sim = nn.Sequential(
+            nn.Linear(feature_dim * 2, 256),
+            nn.ReLU(),
+            nn.Linear(256, 128),
+            nn.ReLU(),
+            nn.Linear(128, 1),
+            nn.Sigmoid()
+        )
+        
+        # Motion compatibility network
+        self.motion_compat = nn.Sequential(
+            nn.Linear(12, 64),  # 4 det + 4 predicted_bbox + 4 velocity
+            nn.ReLU(),
+            nn.Linear(64, 32),
+            nn.ReLU(),
+            nn.Linear(32, 1),
+            nn.Sigmoid()
+        )
+        
+    def compute_affinity_matrix(self,
+                               detections: torch.Tensor,
+                               det_features: torch.Tensor,
+                               tracks: List[TrackState],
+                               frame_id: int) -> torch.Tensor:
+        """
+        Compute affinity matrix between detections and tracks.
+        
+        Args:
+            detections: Current detections [N, 4]
+            det_features: Detection features [N, D]
+            tracks: List of track states
+            frame_id: Current frame ID
+            
+        Returns:
+            Affinity matrix [N, M] where M is number of tracks
+        """
+        if len(tracks) == 0:
+            return torch.zeros(len(detections), 0)
+        
+        N = len(detections)
+        M = len(tracks)
+        
+        affinity_matrix = torch.zeros(N, M)
+        
+        for i, (det, det_feat) in enumerate(zip(detections, det_features)):
+            for j, track in enumerate(tracks):
+                if not track.is_active:
+                    continue
+                
+                # Appearance similarity
+                track_feat = track.feature_history[-1]
+                app_input = torch.cat([det_feat, track_feat])
+                app_sim = self.appearance_sim(app_input)
+                
+                # Motion compatibility
+                predicted_bbox = track.predict(frame_id)
+                motion_input = torch.cat([det, predicted_bbox, track.velocity])
+                motion_sim = self.motion_compat(motion_input)
+                
+                # Combined affinity
+                affinity = (self.appearance_weight * app_sim + 
+                           self.motion_weight * motion_sim)
+                
+                # IoU penalty
+                iou = self.compute_iou(det.unsqueeze(0), predicted_bbox.unsqueeze(0))
+                affinity = affinity * iou
+                
+                affinity_matrix[i, j] = affinity
+        
+        return affinity_matrix
+    
+    @staticmethod
+    def compute_iou(boxes1: torch.Tensor, boxes2: torch.Tensor) -> torch.Tensor:
+        """Compute IoU between two sets of boxes."""
+        # boxes: [N, 4] (x1, y1, x2, y2)
+        area1 = (boxes1[:, 2] - boxes1[:, 0]) * (boxes1[:, 3] - boxes1[:, 1])
+        area2 = (boxes2[:, 2] - boxes2[:, 0]) * (boxes2[:, 3] - boxes2[:, 1])
+        
+        inter_x1 = torch.max(boxes1[:, 0], boxes2[:, 0])
+        inter_y1 = torch.max(boxes1[:, 1], boxes2[:, 1])
+        inter_x2 = torch.min(boxes1[:, 2], boxes2[:, 2])
+        inter_y2 = torch.min(boxes1[:, 3], boxes2[:, 3])
+        
+        inter_area = torch.clamp(inter_x2 - inter_x1, min=0) * torch.clamp(inter_y2 - inter_y1, min=0)
+        
+        union_area = area1 + area2 - inter_area
+        iou = inter_area / (union_area + 1e-6)
+        
+        return iou
+
+
+class TemporalDetectionMemory(nn.Module):
+    """
+    Complete Temporal Detection Memory module.
+    
+    Maintains temporal consistency for detections and tracks objects across frames.
+    """
+    
+    def __init__(self,
+                 feature_dim: int = 256,
+                 max_tracks: int = 100,
+                 temporal_window: int = 5,
+                 match_threshold: float = 0.5):
+        super().__init__()
+        self.feature_dim = feature_dim
+        self.max_tracks = max_tracks
+        self.temporal_window = temporal_window
+        self.match_threshold = match_threshold
+        
+        # Components
+        self.stabilizer = DetectionStabilizer(feature_dim, temporal_window)
+        self.matcher = TrackMatcher(feature_dim)
+        
+        # Track management
+        self.tracks: Dict[int, TrackState] = {}
+        self.next_track_id = 0
+        self.frame_id = 0
+        
+        # Feature history for temporal aggregation
+        self.feature_history: List[torch.Tensor] = []
+        
+    def forward(self,
+                detections: torch.Tensor,
+                features: torch.Tensor,
+                scores: torch.Tensor) -> Dict[str, torch.Tensor]:
+        """
+        Process detections with temporal consistency.
+        
+        Args:
+            detections: Detection boxes [N, 4] (x1, y1, x2, y2)
+            features: Detection features [N, D]
+            scores: Detection confidence scores [N]
+            
+        Returns:
+            Dictionary containing:
+                - stabilized_detections: Stabilized boxes [N, 4]
+                - track_ids: Track IDs for each detection [N]
+                - temporal_consistency: Consistency scores [N]
+                - active_tracks: Number of active tracks
+        """
+        self.frame_id += 1
+        
+        # Stabilize detections
+        stabilized, stability_scores = self.stabilizer(
+            detections, features, self.feature_history
+        )
+        
+        # Update feature history
+        self.feature_history.append(features)
+        if len(self.feature_history) > self.temporal_window:
+            self.feature_history.pop(0)
+        
+        # Match detections to tracks
+        track_list = list(self.tracks.values())
+        affinity_matrix = self.matcher.compute_affinity_matrix(
+            stabilized, features, track_list, self.frame_id
+        )
+        
+        # Hungarian matching
+        track_ids = self._assign_tracks(affinity_matrix, stabilized, features, scores)
+        
+        # Calculate temporal consistency
+        temporal_consistency = self._compute_consistency(track_ids)
+        
+        # Clean up old tracks
+        self._cleanup_tracks()
+        
+        return {
+            'stabilized_detections': stabilized,
+            'track_ids': track_ids,
+            'temporal_consistency': temporal_consistency,
+            'stability_scores': stability_scores,
+            'active_tracks': len([t for t in self.tracks.values() if t.is_active])
+        }
+    
+    def _assign_tracks(self,
+                      affinity_matrix: torch.Tensor,
+                      detections: torch.Tensor,
+                      features: torch.Tensor,
+                      scores: torch.Tensor) -> torch.Tensor:
+        """Assign detections to tracks using Hungarian algorithm."""
+        N = len(detections)
+        track_ids = torch.full((N,), -1, dtype=torch.long)
+        
+        if affinity_matrix.numel() == 0:
+            # No existing tracks, create new ones
+            for i in range(N):
+                track_id = self._create_track(detections[i], features[i], scores[i])
+                track_ids[i] = track_id
+            return track_ids
+        
+        # Simple greedy matching (can be replaced with Hungarian algorithm)
+        matched_tracks = set()
+        
+        for i in range(N):
+            if affinity_matrix.size(1) > 0:
+                best_match = affinity_matrix[i].argmax()
+                best_score = affinity_matrix[i, best_match]
+                
+                if best_score > self.match_threshold and best_match not in matched_tracks:
+                    # Update existing track
+                    track_id = list(self.tracks.keys())[best_match]
+                    self.tracks[track_id].update(
+                        detections[i], features[i], scores[i], self.frame_id
+                    )
+                    track_ids[i] = track_id
+                    matched_tracks.add(best_match)
+                else:
+                    # Create new track
+                    track_id = self._create_track(detections[i], features[i], scores[i])
+                    track_ids[i] = track_id
+            else:
+                # Create new track
+                track_id = self._create_track(detections[i], features[i], scores[i])
+                track_ids[i] = track_id
+        
+        # Mark unmatched tracks as missed
+        for idx, track in enumerate(self.tracks.values()):
+            if idx not in matched_tracks:
+                track.mark_missed()
+        
+        return track_ids
+    
+    def _create_track(self, 
+                     bbox: torch.Tensor, 
+                     features: torch.Tensor, 
+                     confidence: float) -> int:
+        """Create a new track."""
+        track_id = self.next_track_id
+        self.tracks[track_id] = TrackState(
+            track_id, bbox, features, confidence, self.frame_id
+        )
+        self.next_track_id += 1
+        return track_id
+    
+    def _compute_consistency(self, track_ids: torch.Tensor) -> torch.Tensor:
+        """Compute temporal consistency scores."""
+        consistency = torch.ones(len(track_ids))
+        
+        for i, track_id in enumerate(track_ids):
+            if track_id >= 0 and track_id in self.tracks:
+                track = self.tracks[track_id]
+                # Higher consistency for tracks with longer history
+                consistency[i] = min(len(track.bbox_history) / 5, 1.0)
+        
+        return consistency
+    
+    def _cleanup_tracks(self):
+        """Remove old inactive tracks."""
+        inactive = [tid for tid, track in self.tracks.items() if not track.is_active]
+        for tid in inactive:
+            del self.tracks[tid]
+        
+        # Limit total tracks
+        if len(self.tracks) > self.max_tracks:
+            # Remove oldest tracks
+            sorted_tracks = sorted(self.tracks.items(), 
+                                 key=lambda x: x[1].frame_ids[-1])
+            for tid, _ in sorted_tracks[:-self.max_tracks]:
+                del self.tracks[tid]
+    
+    def get_track_info(self) -> Dict[str, any]:
+        """Get information about current tracks."""
+        active = [t for t in self.tracks.values() if t.is_active]
+        return {
+            'num_active_tracks': len(active),
+            'num_total_tracks': len(self.tracks),
+            'average_track_length': np.mean([len(t.bbox_history) for t in active]) if active else 0,
+            'frame_id': self.frame_id
+        }
+    
+    def reset(self):
+        """Reset temporal memory."""
+        self.tracks.clear()
+        self.feature_history.clear()
+        self.next_track_id = 0
+        self.frame_id = 0
+
+
+class TemporalConsistencyLoss(nn.Module):
+    """
+    Loss function for temporal consistency in detection.
+    """
+    
+    def __init__(self, 
+                 temporal_weight: float = 1.0,
+                 smoothness_weight: float = 0.5):
+        super().__init__()
+        self.temporal_weight = temporal_weight
+        self.smoothness_weight = smoothness_weight
+        
+    def forward(self,
+                current_detections: torch.Tensor,
+                previous_detections: torch.Tensor,
+                track_ids: torch.Tensor) -> torch.Tensor:
+        """
+        Compute temporal consistency loss.
+        
+        Args:
+            current_detections: Current frame detections [N, 4]
+            previous_detections: Previous frame detections [M, 4]
+            track_ids: Track IDs linking current to previous [N]
+            
+        Returns:
+            Temporal consistency loss
+        """
+        if len(previous_detections) == 0 or track_ids.numel() == 0:
+            return torch.tensor(0.0, device=current_detections.device)
+        
+        # Find matched detections
+        temporal_loss = 0.0
+        num_matches = 0
+        
+        for i, track_id in enumerate(track_ids):
+            if track_id >= 0 and track_id < len(previous_detections):
+                # L2 distance between current and previous
+                diff = current_detections[i] - previous_detections[track_id]
+                temporal_loss += torch.norm(diff)
+                num_matches += 1
+        
+        if num_matches > 0:
+            temporal_loss = temporal_loss / num_matches
+        
+        # Smoothness loss (encourage smooth motion)
+        smoothness_loss = 0.0
+        if len(current_detections) > 1:
+            # Penalize large changes in box size/aspect ratio
+            widths = current_detections[:, 2] - current_detections[:, 0]
+            heights = current_detections[:, 3] - current_detections[:, 1]
+            aspect_ratios = widths / (heights + 1e-6)
+            
+            smoothness_loss = torch.var(aspect_ratios)
+        
+        total_loss = (self.temporal_weight * temporal_loss + 
+                     self.smoothness_weight * smoothness_loss)
+        
+        return total_loss
+
+
+if __name__ == "__main__":
+    # Test the module
+    print("Testing Temporal Detection Memory Module...")
+    
+    # Create module
+    module = TemporalDetectionMemory(feature_dim=256)
+    
+    # Simulate multiple frames
+    for frame_idx in range(10):
+        # Random detections
+        num_detections = torch.randint(3, 8, (1,)).item()
+        detections = torch.randn(num_detections, 4).clamp(0, 1)
+        detections[:, 2:] += detections[:, :2]  # Ensure x2 > x1, y2 > y1
+        
+        features = torch.randn(num_detections, 256)
+        scores = torch.rand(num_detections)
+        
+        # Forward pass
+        output = module(detections, features, scores)
+        
+        print(f"\
+Frame {frame_idx + 1}:")
+        print(f"  Detections: {num_detections}")
+        print(f"  Active tracks: {output['active_tracks']}")
+        print(f"  Avg consistency: {output['temporal_consistency'].mean():.3f}")
+    
+    # Track info
+    info = module.get_track_info()
+    print(f"\
+Final Track Info: {info}")
+    
+    # Test temporal loss
+    print("\
+Testing Temporal Consistency Loss...")
+    loss_fn = TemporalConsistencyLoss()
+    current = torch.randn(5, 4).clamp(0, 1)
+    previous = torch.randn(5, 4).clamp(0, 1)
+    track_ids = torch.tensor([0, 1, 2, 3, 4])
+    loss = loss_fn(current, previous, track_ids)
+    print(f"Temporal loss: {loss.item():.4f}")
+    
+    print("\
+✓ Temporal Detection Memory Module test passed!")

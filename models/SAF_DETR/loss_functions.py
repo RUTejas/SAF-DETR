@@ -53,23 +53,32 @@ class DetectionLoss(nn.Module):
             total_loss: Combined detection loss
             loss_dict: Dictionary of individual losses
         """
+        # Ensure 2D format for box calculations
+        if target_boxes.dim() == 3:
+            target_boxes = target_boxes.view(-1, 4)
+        if target_labels.dim() > 1:
+            target_labels = target_labels.view(-1)
+
+        # Filter out zero padded targets
+        if len(target_boxes) > 0:
+            valid_mask = (target_boxes.abs().sum(dim=-1) > 1e-4)
+            target_boxes = target_boxes[valid_mask]
+            target_labels = target_labels[valid_mask]
+
         # Match predictions to targets
-        matched_indices = self._match_predictions(pred_boxes, target_boxes)
+        matched_pred_idx, matched_tgt_idx = self._match_predictions(pred_boxes, target_boxes)
         
         # Classification loss
-        if len(target_labels) > 0:
-            target_classes = torch.zeros(len(pred_logits), dtype=torch.long, 
-                                        device=pred_logits.device)
-            target_classes[matched_indices] = target_labels
+        target_classes = torch.zeros(len(pred_logits), dtype=torch.long, device=pred_logits.device)
+        if len(matched_pred_idx) > 0:
+            target_classes[matched_pred_idx] = target_labels[matched_tgt_idx]
             
-            cls_loss = self.focal_loss(pred_logits, target_classes)
-        else:
-            cls_loss = torch.tensor(0.0, device=pred_logits.device)
+        cls_loss = self.focal_loss(pred_logits, target_classes)
         
         # Box regression loss
-        if len(target_boxes) > 0 and len(pred_boxes) > 0:
-            matched_pred_boxes = pred_boxes[matched_indices]
-            matched_target_boxes = target_boxes
+        if len(matched_pred_idx) > 0:
+            matched_pred_boxes = pred_boxes[matched_pred_idx]
+            matched_target_boxes = target_boxes[matched_tgt_idx]
             
             # L1 loss
             l1_loss = F.l1_loss(matched_pred_boxes, matched_target_boxes)
@@ -96,30 +105,36 @@ class DetectionLoss(nn.Module):
     
     def _match_predictions(self,
                           pred_boxes: torch.Tensor,
-                          target_boxes: torch.Tensor) -> torch.Tensor:
+                          target_boxes: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         """Match predictions to targets using IoU."""
-        if len(target_boxes) == 0:
-            return torch.zeros(0, dtype=torch.long, device=pred_boxes.device)
+        if len(target_boxes) == 0 or len(pred_boxes) == 0:
+            empty = torch.empty(0, dtype=torch.long, device=pred_boxes.device)
+            return empty, empty
         
         # Compute IoU matrix
         iou_matrix = self._compute_iou_matrix(pred_boxes, target_boxes)
         
         # Greedy matching
-        matched_indices = []
+        matched_preds = []
+        matched_targets = []
         used_targets = set()
         
         for i in range(len(pred_boxes)):
-            best_iou = 0.5  # Threshold
+            best_iou = 0.3  # Threshold
             best_target = -1
             
             for j in range(len(target_boxes)):
-                if j not in used_targets and iou_matrix[i, j] > best_iou:
-                    best_iou = iou_matrix[i, j]
+                if j not in used_targets and iou_matrix[i, j].item() > best_iou:
+                    best_iou = iou_matrix[i, j].item()
                     best_target = j
             
-            matched_indices.append(best_target)
+            if best_target >= 0:
+                matched_preds.append(i)
+                matched_targets.append(best_target)
+                used_targets.add(best_target)
         
-        return torch.tensor(matched_indices, dtype=torch.long, device=pred_boxes.device)
+        return (torch.tensor(matched_preds, dtype=torch.long, device=pred_boxes.device),
+                torch.tensor(matched_targets, dtype=torch.long, device=pred_boxes.device))
     
     @staticmethod
     def _compute_iou_matrix(boxes1: torch.Tensor, boxes2: torch.Tensor) -> torch.Tensor:

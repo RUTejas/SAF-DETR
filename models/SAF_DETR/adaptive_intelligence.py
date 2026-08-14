@@ -12,6 +12,7 @@ Date: 2026
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import torchvision.transforms.functional as TF
 import cv2
 import numpy as np
 from typing import Dict, Tuple, Optional
@@ -139,7 +140,7 @@ class BrightnessEnhancer(nn.Module):
             
             # Apply CLAHE
             clahe = cv2.createCLAHE(
-                clipLimit=float(self.clahe_clip.clamp(1, 10)),
+                clipLimit=float(self.clahe_clip.detach().clamp(1, 10)),
                 tileGridSize=(8, 8)
             )
             l = clahe.apply(l)
@@ -171,7 +172,7 @@ class SharpeningModule(nn.Module):
         
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         # Gaussian blur
-        blurred = F.gaussian_blur(x, kernel_size=5, sigma=1.0)
+        blurred = TF.gaussian_blur(x, kernel_size=[5, 5], sigma=[1.0, 1.0])
         
         # Unsharp masking
         sharpened = x + self.sharpen_strength * (x - blurred)

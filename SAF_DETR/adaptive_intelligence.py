@@ -1,1 +1,353 @@
-\"\"\"\nSAF-DETR: Adaptive Image Intelligence Module\n==============================================\n\nThis module automatically detects image quality issues in surveillance frames\nand applies appropriate enhancement strategies.\n\nAuthor: SAF-DETR Research Team\nDate: 2026\n\"\"\"\n\nimport torch\nimport torch.nn as nn\nimport torch.nn.functional as F\nimport cv2\nimport numpy as np\nfrom typing import Dict, Tuple, Optional\n\n\nclass QualityAssessor(nn.Module):\n    \"\"\"\n    Assesses image quality metrics for surveillance frames.\n    \n    Measures:\n    - Brightness level\n    - Blur amount\n    - Noise level\n    - Compression artifacts\n    \"\"\"\n    \n    def __init__(self):\n        super().__init__()\n        # Learnable quality assessment\n        self.brightness_conv = nn.Conv2d(3, 16, 3, padding=1)\n        self.blur_conv = nn.Conv2d(3, 16, 3, padding=1)\n        self.noise_conv = nn.Conv2d(3, 16, 3, padding=1)\n        \n        self.quality_head = nn.Sequential(\n            nn.AdaptiveAvgPool2d(1),\n            nn.Flatten(),\n            nn.Linear(48, 32),\n            nn.ReLU(),\n            nn.Linear(32, 4),  # [brightness, blur, noise, compression]\n            nn.Sigmoid()\n        )\n        \n    def forward(self, x: torch.Tensor) -> torch.Tensor:\n        \"\"\"\n        Args:\n            x: Input image tensor [B, 3, H, W] in range [0, 1]\n            \n        Returns:\n            Quality scores [B, 4] for [brightness, blur, noise, compression]\n        \"\"\"\n        # Extract features for each quality metric\n        brightness_feat = self.brightness_conv(x)\n        blur_feat = self.blur_conv(x)\n        noise_feat = self.noise_conv(x)\n        \n        # Concatenate features\n        features = torch.cat([brightness_feat, blur_feat, noise_feat], dim=1)\n        \n        # Predict quality scores\n        quality_scores = self.quality_head(features)\n        \n        return quality_scores\n\n\nclass EnhancementStrategy(nn.Module):\n    \"\"\"\n    Selects and applies enhancement strategy based on quality assessment.\n    \"\"\"\n    \n    def __init__(self, num_strategies: int = 4):\n        super().__init__()\n        self.num_strategies = num_strategies\n        \n        # Strategy selection network\n        self.strategy_selector = nn.Sequential(\n            nn.Linear(4, 16),\n            nn.ReLU(),\n            nn.Linear(16, num_strategies),\n            nn.Softmax(dim=-1)\n        )\n        \n        # Enhancement modules\n        self.brightness_enhancer = BrightnessEnhancer()\n        self.sharpening_module = SharpeningModule()\n        self.denoising_module = DenoisingModule()\n        self.compression_restorer = CompressionRestorer()\n        \n    def forward(self, x: torch.Tensor, quality_scores: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:\n        \"\"\"\n        Args:\n            x: Input image [B, 3, H, W]\n            quality_scores: Quality metrics [B, 4]\n            \n        Returns:\n            enhanced: Enhanced image [B, 3, H, W]\n            strategy_weights: Strategy selection weights [B, num_strategies]\n        \"\"\"\n        # Select enhancement strategy\n        strategy_weights = self.strategy_selector(quality_scores)\n        \n        # Apply all enhancements\n        brightness_enhanced = self.brightness_enhancer(x)\n        sharpened = self.sharpening_module(x)\n        denoised = self.denoising_module(x)\n        restored = self.compression_restorer(x)\n        \n        # Weighted combination based on strategy\n        enhanced = (\n            strategy_weights[:, 0:1, None, None] * brightness_enhanced +\n            strategy_weights[:, 1:2, None, None] * sharpened +\n            strategy_weights[:, 2:3, None, None] * denoised +\n            strategy_weights[:, 3:4, None, None] * restored\n        )\n        \n        return enhanced, strategy_weights\n\n\nclass BrightnessEnhancer(nn.Module):\n    \"\"\"Enhances low-light images using CLAHE and gamma correction.\"\"\"\n    \n    def __init__(self):\n        super().__init__()\n        self.gamma = nn.Parameter(torch.tensor(1.0))\n        self.clahe_clip = nn.Parameter(torch.tensor(2.0))\n        \n    def forward(self, x: torch.Tensor) -> torch.Tensor:\n        # Convert to LAB for CLAHE\n        x_np = x.permute(0, 2, 3, 1).cpu().numpy()\n        enhanced = []\n        \n        for img in x_np:\n            img_uint8 = (img * 255).astype(np.uint8)\n            lab = cv2.cvtColor(img_uint8, cv2.COLOR_RGB2LAB)\n            l, a, b = cv2.split(lab)\n            \n            # Apply CLAHE\n            clahe = cv2.createCLAHE(\n                clipLimit=float(self.clahe_clip.clamp(1, 10)),\n                tileGridSize=(8, 8)\n            )\n            l = clahe.apply(l)\n            \n            lab = cv2.merge([l, a, b])\n            enhanced_img = cv2.cvtColor(lab, cv2.COLOR_LAB2RGB)\n            enhanced.append(enhanced_img / 255.0)\n        \n        enhanced = torch.tensor(np.stack(enhanced), dtype=x.dtype, device=x.device)\n        enhanced = enhanced.permute(0, 3, 1, 2)\n        \n        # Apply gamma correction\n        gamma = self.gamma.clamp(0.5, 2.0)\n        enhanced = torch.pow(enhanced, gamma)\n        \n        return enhanced\n\n\nclass SharpeningModule(nn.Module):\n    \"\"\"Reduces blur using unsharp masking.\"\"\"\n    \n    def __init__(self):\n        super().__init__()\n        self.sharpen_strength = nn.Parameter(torch.tensor(1.5))\n        \n        # Learnable sharpening kernel\n        self.sharpen_conv = nn.Conv2d(3, 3, 3, padding=1, bias=False)\n        nn.init.dirac_(self.sharpen_conv.weight)\n        \n    def forward(self, x: torch.Tensor) -> torch.Tensor:\n        # Gaussian blur\n        blurred = F.gaussian_blur(x, kernel_size=5, sigma=1.0)\n        \n        # Unsharp masking\n        sharpened = x + self.sharpen_strength * (x - blurred)\n        sharpened = torch.clamp(sharpened, 0, 1)\n        \n        # Learnable refinement\n        sharpened = self.sharpen_conv(sharpened)\n        \n        return sharpened\n\n\nclass DenoisingModule(nn.Module):\n    \"\"\"Reduces noise using learned denoising.\"\"\"\n    \n    def __init__(self):\n        super().__init__()\n        self.denoise_net = nn.Sequential(\n            nn.Conv2d(3, 32, 3, padding=1),\n            nn.ReLU(),\n            nn.Conv2d(32, 32, 3, padding=1),\n            nn.ReLU(),\n            nn.Conv2d(32, 3, 3, padding=1)\n        )\n        \n    def forward(self, x: torch.Tensor) -> torch.Tensor:\n        noise = self.denoise_net(x)\n        denoised = x - noise\n        return torch.clamp(denoised, 0, 1)\n\n\nclass CompressionRestorer(nn.Module):\n    \"\"\"Reduces compression artifacts.\"\"\"\n    \n    def __init__(self):\n        super().__init__()\n        self.restoration_net = nn.Sequential(\n            nn.Conv2d(3, 64, 3, padding=1),\n            nn.ReLU(),\n            nn.Conv2d(64, 64, 3, padding=1),\n            nn.ReLU(),\n            nn.Conv2d(64, 3, 3, padding=1)\n        )\n        \n    def forward(self, x: torch.Tensor) -> torch.Tensor:\n        restored = x + self.restoration_net(x)\n        return torch.clamp(restored, 0, 1)\n\n\nclass AdaptiveImageIntelligence(nn.Module):\n    \"\"\"\n    Complete Adaptive Image Intelligence Module.\n    \n    Automatically assesses frame quality and applies appropriate enhancement.\n    \"\"\"\n    \n    def __init__(self, \n                 brightness_threshold: float = 0.3,\n                 blur_threshold: float = 0.4,\n                 noise_threshold: float = 0.5,\n                 compression_threshold: float = 0.5):\n        super().__init__()\n        \n        self.quality_assessor = QualityAssessor()\n        self.enhancement_strategy = EnhancementStrategy()\n        \n        self.brightness_threshold = brightness_threshold\n        self.blur_threshold = blur_threshold\n        self.noise_threshold = noise_threshold\n        self.compression_threshold = compression_threshold\n        \n    def forward(self, x: torch.Tensor) -> Dict[str, torch.Tensor]:\n        \"\"\"\n        Args:\n            x: Input frame [B, 3, H, W] in range [0, 1]\n            \n        Returns:\n            Dictionary containing:\n                - enhanced: Enhanced frame [B, 3, H, W]\n                - quality_scores: Quality metrics [B, 4]\n                - strategy_weights: Enhancement strategy weights [B, 4]\n                - needs_enhancement: Boolean mask [B]\n        \"\"\"\n        # Assess quality\n        quality_scores = self.quality_assessor(x)\n        \n        # Determine if enhancement is needed\n        needs_enhancement = (\n            (quality_scores[:, 0] < self.brightness_threshold) |  # Too dark\n            (quality_scores[:, 1] < self.blur_threshold) |         # Too blurry\n            (quality_scores[:, 2] > self.noise_threshold) |        # Too noisy\n            (quality_scores[:, 3] > self.compression_threshold)    # Compressed\n        )\n        \n        # Apply enhancement\n        enhanced, strategy_weights = self.enhancement_strategy(x, quality_scores)\n        \n        # Use enhanced version only where needed\n        output = torch.where(\n            needs_enhancement[:, None, None, None],\n            enhanced,\n            x\n        )\n        \n        return {\n            'enhanced': output,\n            'quality_scores': quality_scores,\n            'strategy_weights': strategy_weights,\n            'needs_enhancement': needs_enhancement\n        }\n    \n    def get_quality_report(self, quality_scores: torch.Tensor) -> Dict[str, float]:\n        \"\"\"Generate human-readable quality report.\"\"\"\n        return {\n            'brightness': quality_scores[0].item(),\n            'blur': quality_scores[1].item(),\n            'noise': quality_scores[2].item(),\n            'compression': quality_scores[3].item(),\n            'overall_quality': quality_scores.mean().item()\n        }\n\n\n# Utility functions for OpenCV integration\ndef preprocess_frame(frame: np.ndarray, target_size: Tuple[int, int] = (640, 640)) -> torch.Tensor:\n    \"\"\"\n    Preprocess OpenCV frame for SAF-DETR.\n    \n    Args:\n        frame: OpenCV BGR frame [H, W, 3]\n        target_size: Target size (H, W)\n        \n    Returns:\n        Preprocessed tensor [1, 3, H, W]\n    \"\"\"\n    # Convert BGR to RGB\n    frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)\n    \n    # Resize\n    frame_resized = cv2.resize(frame_rgb, target_size[::-1])\n    \n    # Normalize to [0, 1]\n    frame_normalized = frame_resized.astype(np.float32) / 255.0\n    \n    # To tensor [1, 3, H, W]\n    tensor = torch.from_numpy(frame_normalized).permute(2, 0, 1).unsqueeze(0)\n    \n    return tensor\n\n\ndef postprocess_frame(tensor: torch.Tensor) -> np.ndarray:\n    \"\"\"\n    Convert SAF-DETR output tensor back to OpenCV frame.\n    \n    Args:\n        tensor: Output tensor [1, 3, H, W]\n        \n    Returns:\n        OpenCV BGR frame [H, W, 3]\n    \"\"\"\n    # Remove batch dimension and convert to numpy\n    frame = tensor.squeeze(0).permute(1, 2, 0).cpu().numpy()\n    \n    # Denormalize to [0, 255]\n    frame = (frame * 255).astype(np.uint8)\n    \n    # Convert RGB to BGR\n    frame_bgr = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)\n    \n    return frame_bgr\n\n\nif __name__ == \"__main__\":\n    # Test the module\n    print(\"Testing Adaptive Image Intelligence Module...\")\n    \n    # Create module\n    module = AdaptiveImageIntelligence()\n    \n    # Test input\n    x = torch.randn(2, 3, 640, 640).clamp(0, 1)\n    \n    # Forward pass\n    output = module(x)\n    \n    print(f\"Input shape: {x.shape}\")\n    print(f\"Enhanced shape: {output['enhanced'].shape}\")\n    print(f\"Quality scores: {output['quality_scores']}\")\n    print(f\"Strategy weights: {output['strategy_weights']}\")\n    print(f\"Needs enhancement: {output['needs_enhancement']}\")\n    \n    # Quality report\n    report = module.get_quality_report(output['quality_scores'][0])\n    print(f\"\\nQuality Report: {report}\")\n    \n    print(\"\\n✓ Adaptive Image Intelligence Module test passed!\")\n
+"""
+SAF-DETR: Adaptive Image Intelligence Module
+==============================================
+
+This module automatically detects image quality issues in surveillance frames
+and applies appropriate enhancement strategies.
+
+Author: SAF-DETR Research Team
+Date: 2026
+"""
+
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import torchvision.transforms.functional as TF
+import cv2
+import numpy as np
+from typing import Dict, Tuple, Optional
+
+
+class QualityAssessor(nn.Module):
+    """
+    Assesses image quality metrics for surveillance frames.
+    
+    Measures:
+    - Brightness level
+    - Blur amount
+    - Noise level
+    - Compression artifacts
+    """
+    
+    def __init__(self):
+        super().__init__()
+        # Learnable quality assessment
+        self.brightness_conv = nn.Conv2d(3, 16, 3, padding=1)
+        self.blur_conv = nn.Conv2d(3, 16, 3, padding=1)
+        self.noise_conv = nn.Conv2d(3, 16, 3, padding=1)
+        
+        self.quality_head = nn.Sequential(
+            nn.AdaptiveAvgPool2d(1),
+            nn.Flatten(),
+            nn.Linear(48, 32),
+            nn.ReLU(),
+            nn.Linear(32, 4),  # [brightness, blur, noise, compression]
+            nn.Sigmoid()
+        )
+        
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            x: Input image tensor [B, 3, H, W] in range [0, 1]
+            
+        Returns:
+            Quality scores [B, 4] for [brightness, blur, noise, compression]
+        """
+        # Extract features for each quality metric
+        brightness_feat = self.brightness_conv(x)
+        blur_feat = self.blur_conv(x)
+        noise_feat = self.noise_conv(x)
+        
+        # Concatenate features
+        features = torch.cat([brightness_feat, blur_feat, noise_feat], dim=1)
+        
+        # Predict quality scores
+        quality_scores = self.quality_head(features)
+        
+        return quality_scores
+
+
+class EnhancementStrategy(nn.Module):
+    """
+    Selects and applies enhancement strategy based on quality assessment.
+    """
+    
+    def __init__(self, num_strategies: int = 4):
+        super().__init__()
+        self.num_strategies = num_strategies
+        
+        # Strategy selection network
+        self.strategy_selector = nn.Sequential(
+            nn.Linear(4, 16),
+            nn.ReLU(),
+            nn.Linear(16, num_strategies),
+            nn.Softmax(dim=-1)
+        )
+        
+        # Enhancement modules
+        self.brightness_enhancer = BrightnessEnhancer()
+        self.sharpening_module = SharpeningModule()
+        self.denoising_module = DenoisingModule()
+        self.compression_restorer = CompressionRestorer()
+        
+    def forward(self, x: torch.Tensor, quality_scores: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Args:
+            x: Input image [B, 3, H, W]
+            quality_scores: Quality metrics [B, 4]
+            
+        Returns:
+            enhanced: Enhanced image [B, 3, H, W]
+            strategy_weights: Strategy selection weights [B, num_strategies]
+        """
+        # Select enhancement strategy
+        strategy_weights = self.strategy_selector(quality_scores)
+        
+        # Apply all enhancements
+        brightness_enhanced = self.brightness_enhancer(x)
+        sharpened = self.sharpening_module(x)
+        denoised = self.denoising_module(x)
+        restored = self.compression_restorer(x)
+        
+        # Weighted combination based on strategy
+        enhanced = (
+            strategy_weights[:, 0:1, None, None] * brightness_enhanced +
+            strategy_weights[:, 1:2, None, None] * sharpened +
+            strategy_weights[:, 2:3, None, None] * denoised +
+            strategy_weights[:, 3:4, None, None] * restored
+        )
+        
+        return enhanced, strategy_weights
+
+
+class BrightnessEnhancer(nn.Module):
+    """Enhances low-light images using CLAHE and gamma correction."""
+    
+    def __init__(self):
+        super().__init__()
+        self.gamma = nn.Parameter(torch.tensor(1.0))
+        self.clahe_clip = nn.Parameter(torch.tensor(2.0))
+        
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # Convert to LAB for CLAHE
+        x_np = x.permute(0, 2, 3, 1).cpu().numpy()
+        enhanced = []
+        
+        for img in x_np:
+            img_uint8 = (img * 255).astype(np.uint8)
+            lab = cv2.cvtColor(img_uint8, cv2.COLOR_RGB2LAB)
+            l, a, b = cv2.split(lab)
+            
+            # Apply CLAHE
+            clahe = cv2.createCLAHE(
+                clipLimit=float(self.clahe_clip.detach().clamp(1, 10)),
+                tileGridSize=(8, 8)
+            )
+            l = clahe.apply(l)
+            
+            lab = cv2.merge([l, a, b])
+            enhanced_img = cv2.cvtColor(lab, cv2.COLOR_LAB2RGB)
+            enhanced.append(enhanced_img / 255.0)
+        
+        enhanced = torch.tensor(np.stack(enhanced), dtype=x.dtype, device=x.device)
+        enhanced = enhanced.permute(0, 3, 1, 2)
+        
+        # Apply gamma correction
+        gamma = self.gamma.clamp(0.5, 2.0)
+        enhanced = torch.pow(enhanced, gamma)
+        
+        return enhanced
+
+
+class SharpeningModule(nn.Module):
+    """Reduces blur using unsharp masking."""
+    
+    def __init__(self):
+        super().__init__()
+        self.sharpen_strength = nn.Parameter(torch.tensor(1.5))
+        
+        # Learnable sharpening kernel
+        self.sharpen_conv = nn.Conv2d(3, 3, 3, padding=1, bias=False)
+        nn.init.dirac_(self.sharpen_conv.weight)
+        
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # Gaussian blur
+        blurred = TF.gaussian_blur(x, kernel_size=[5, 5], sigma=[1.0, 1.0])
+        
+        # Unsharp masking
+        sharpened = x + self.sharpen_strength * (x - blurred)
+        sharpened = torch.clamp(sharpened, 0, 1)
+        
+        # Learnable refinement
+        sharpened = self.sharpen_conv(sharpened)
+        
+        return sharpened
+
+
+class DenoisingModule(nn.Module):
+    """Reduces noise using learned denoising."""
+    
+    def __init__(self):
+        super().__init__()
+        self.denoise_net = nn.Sequential(
+            nn.Conv2d(3, 32, 3, padding=1),
+            nn.ReLU(),
+            nn.Conv2d(32, 32, 3, padding=1),
+            nn.ReLU(),
+            nn.Conv2d(32, 3, 3, padding=1)
+        )
+        
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        noise = self.denoise_net(x)
+        denoised = x - noise
+        return torch.clamp(denoised, 0, 1)
+
+
+class CompressionRestorer(nn.Module):
+    """Reduces compression artifacts."""
+    
+    def __init__(self):
+        super().__init__()
+        self.restoration_net = nn.Sequential(
+            nn.Conv2d(3, 64, 3, padding=1),
+            nn.ReLU(),
+            nn.Conv2d(64, 64, 3, padding=1),
+            nn.ReLU(),
+            nn.Conv2d(64, 3, 3, padding=1)
+        )
+        
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        restored = x + self.restoration_net(x)
+        return torch.clamp(restored, 0, 1)
+
+
+class AdaptiveImageIntelligence(nn.Module):
+    """
+    Complete Adaptive Image Intelligence Module.
+    
+    Automatically assesses frame quality and applies appropriate enhancement.
+    """
+    
+    def __init__(self, 
+                 brightness_threshold: float = 0.3,
+                 blur_threshold: float = 0.4,
+                 noise_threshold: float = 0.5,
+                 compression_threshold: float = 0.5):
+        super().__init__()
+        
+        self.quality_assessor = QualityAssessor()
+        self.enhancement_strategy = EnhancementStrategy()
+        
+        self.brightness_threshold = brightness_threshold
+        self.blur_threshold = blur_threshold
+        self.noise_threshold = noise_threshold
+        self.compression_threshold = compression_threshold
+        
+    def forward(self, x: torch.Tensor) -> Dict[str, torch.Tensor]:
+        """
+        Args:
+            x: Input frame [B, 3, H, W] in range [0, 1]
+            
+        Returns:
+            Dictionary containing:
+                - enhanced: Enhanced frame [B, 3, H, W]
+                - quality_scores: Quality metrics [B, 4]
+                - strategy_weights: Enhancement strategy weights [B, 4]
+                - needs_enhancement: Boolean mask [B]
+        """
+        # Assess quality
+        quality_scores = self.quality_assessor(x)
+        
+        # Determine if enhancement is needed
+        needs_enhancement = (
+            (quality_scores[:, 0] < self.brightness_threshold) |  # Too dark
+            (quality_scores[:, 1] < self.blur_threshold) |         # Too blurry
+            (quality_scores[:, 2] > self.noise_threshold) |        # Too noisy
+            (quality_scores[:, 3] > self.compression_threshold)    # Compressed
+        )
+        
+        # Apply enhancement
+        enhanced, strategy_weights = self.enhancement_strategy(x, quality_scores)
+        
+        # Use enhanced version only where needed
+        output = torch.where(
+            needs_enhancement[:, None, None, None],
+            enhanced,
+            x
+        )
+        
+        return {
+            'enhanced': output,
+            'quality_scores': quality_scores,
+            'strategy_weights': strategy_weights,
+            'needs_enhancement': needs_enhancement
+        }
+    
+    def get_quality_report(self, quality_scores: torch.Tensor) -> Dict[str, float]:
+        """Generate human-readable quality report."""
+        return {
+            'brightness': quality_scores[0].item(),
+            'blur': quality_scores[1].item(),
+            'noise': quality_scores[2].item(),
+            'compression': quality_scores[3].item(),
+            'overall_quality': quality_scores.mean().item()
+        }
+
+
+# Utility functions for OpenCV integration
+def preprocess_frame(frame: np.ndarray, target_size: Tuple[int, int] = (640, 640)) -> torch.Tensor:
+    """
+    Preprocess OpenCV frame for SAF-DETR.
+    
+    Args:
+        frame: OpenCV BGR frame [H, W, 3]
+        target_size: Target size (H, W)
+        
+    Returns:
+        Preprocessed tensor [1, 3, H, W]
+    """
+    # Convert BGR to RGB
+    frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+    
+    # Resize
+    frame_resized = cv2.resize(frame_rgb, target_size[::-1])
+    
+    # Normalize to [0, 1]
+    frame_normalized = frame_resized.astype(np.float32) / 255.0
+    
+    # To tensor [1, 3, H, W]
+    tensor = torch.from_numpy(frame_normalized).permute(2, 0, 1).unsqueeze(0)
+    
+    return tensor
+
+
+def postprocess_frame(tensor: torch.Tensor) -> np.ndarray:
+    """
+    Convert SAF-DETR output tensor back to OpenCV frame.
+    
+    Args:
+        tensor: Output tensor [1, 3, H, W]
+        
+    Returns:
+        OpenCV BGR frame [H, W, 3]
+    """
+    # Remove batch dimension and convert to numpy
+    frame = tensor.squeeze(0).permute(1, 2, 0).cpu().numpy()
+    
+    # Denormalize to [0, 255]
+    frame = (frame * 255).astype(np.uint8)
+    
+    # Convert RGB to BGR
+    frame_bgr = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+    
+    return frame_bgr
+
+
+if __name__ == "__main__":
+    print("Testing Adaptive Image Intelligence Module...")
+    module = AdaptiveImageIntelligence()
+    x = torch.randn(2, 3, 640, 640).clamp(0, 1)
+    output = module(x)
+    print(f"Input shape: {x.shape}")
+    print(f"Enhanced shape: {output['enhanced'].shape}")
+    print("✓ Adaptive Image Intelligence Module test passed!")

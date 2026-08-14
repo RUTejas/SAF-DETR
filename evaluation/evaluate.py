@@ -1,1 +1,506 @@
-\"\"\"\nSAF-DETR Evaluation Framework\n==============================\n\nComprehensive evaluation with multiple metrics, ablation studies,\nand visualization tools.\n\nAuthor: SAF-DETR Research Team\nDate: 2026\n\"\"\"\n\nimport torch\nimport torch.nn as nn\nimport numpy as np\nfrom typing import Dict, List, Tuple, Optional\nfrom pathlib import Path\nimport json\nimport cv2\nfrom tqdm import tqdm\nimport matplotlib.pyplot as plt\nfrom collections import defaultdict\nimport time\n\n# Import model\nimport sys\nsys.path.append(str(Path(__file__).parent.parent))\nfrom models.SAF_DETR.complete_model import build_saf_detr\n\n\nclass DetectionMetrics:\n    \"\"\"\n    Standard detection metrics: AP, mAP, Precision, Recall.\n    \"\"\"\n    \n    def __init__(self, iou_thresholds: List[float] = [0.5, 0.75]):\n        self.iou_thresholds = iou_thresholds\n        self.reset()\n    \n    def reset(self):\n        self.predictions = []\n        self.ground_truths = []\n        self.scores = []\n    \n    def update(self, pred_boxes: np.ndarray, pred_scores: np.ndarray, \n               gt_boxes: np.ndarray, gt_labels: np.ndarray):\n        \"\"\"Update metrics with new predictions.\"\"\"\n        self.predictions.append({\n            'boxes': pred_boxes,\n            'scores': pred_scores\n        })\n        self.ground_truths.append({\n            'boxes': gt_boxes,\n            'labels': gt_labels\n        })\n    \n    def compute_iou(self, boxes1: np.ndarray, boxes2: np.ndarray) -> np.ndarray:\n        \"\"\"Compute IoU between two sets of boxes.\"\"\"\n        # boxes: [N, 4] (x1, y1, x2, y2)\n        area1 = (boxes1[:, 2] - boxes1[:, 0]) * (boxes1[:, 3] - boxes1[:, 1])\n        area2 = (boxes2[:, 2] - boxes2[:, 0]) * (boxes2[:, 3] - boxes2[:, 1])\n        \n        inter_x1 = np.maximum(boxes1[:, None, 0], boxes2[None, :, 0])\n        inter_y1 = np.maximum(boxes1[:, None, 1], boxes2[None, :, 1])\n        inter_x2 = np.minimum(boxes1[:, None, 2], boxes2[None, :, 2])\n        inter_y2 = np.minimum(boxes1[:, None, 3], boxes2[None, :, 3])\n        \n        inter_area = np.maximum(0, inter_x2 - inter_x1) * np.maximum(0, inter_y2 - inter_y1)\n        union_area = area1[:, None] + area2[None, :] - inter_area\n        \n        iou = inter_area / (union_area + 1e-6)\n        return iou\n    \n    def compute_ap(self, recalls: np.ndarray, precisions: np.ndarray) -> float:\n        \"\"\"Compute Average Precision using 11-point interpolation.\"\"\"\n        # Add sentinel values\n        recalls = np.concatenate([[0], recalls, [1]])\n        precisions = np.concatenate([[0], precisions, [0]])\n        \n        # Compute precision envelope\n        for i in range(len(precisions) - 1, 0, -1):\n            precisions[i - 1] = max(precisions[i - 1], precisions[i])\n        \n        # Find points where recall changes\n        indices = np.where(recalls[1:] != recalls[:-1])[0]\n        \n        # Compute AP\n        ap = np.sum((recalls[indices + 1] - recalls[indices]) * precisions[indices + 1])\n        return ap\n    \n    def evaluate(self) -> Dict[str, float]:\n        \"\"\"Compute all metrics.\"\"\"\n        results = {}\n        \n        for iou_thresh in self.iou_thresholds:\n            tp = 0\n            fp = 0\n            fn = 0\n            \n            all_scores = []\n            all_matches = []\n            \n            for pred, gt in zip(self.predictions, self.ground_truths):\n                pred_boxes = pred['boxes']\n                pred_scores = pred['scores']\n                gt_boxes = gt['boxes']\n                \n                if len(pred_boxes) == 0:\n                    fn += len(gt_boxes)\n                    continue\n                \n                if len(gt_boxes) == 0:\n                    fp += len(pred_boxes)\n                    continue\n                \n                # Compute IoU\n                iou_matrix = self.compute_iou(pred_boxes, gt_boxes)\n                \n                # Match predictions to ground truth\n                matched_gt = set()\n                for i, score in enumerate(pred_scores):\n                    all_scores.append(score)\n                    \n                    if len(iou_matrix[i]) > 0:\n                        best_iou = iou_matrix[i].max()\n                        best_gt = iou_matrix[i].argmax()\n                        \n                        if best_iou >= iou_thresh and best_gt not in matched_gt:\n                            tp += 1\n                            matched_gt.add(best_gt)\n                            all_matches.append(1)  # True positive\n                        else:\n                            fp += 1\n                            all_matches.append(0)  # False positive\n                    else:\n                        fp += 1\n                        all_matches.append(0)\n                \n                fn += len(gt_boxes) - len(matched_gt)\n            \n            # Compute precision-recall curve\n            if len(all_scores) > 0:\n                sorted_indices = np.argsort(all_scores)[::-1]\n                sorted_matches = np.array(all_matches)[sorted_indices]\n                \n                cumsum_tp = np.cumsum(sorted_matches)\n                cumsum_fp = np.cumsum(1 - sorted_matches)\n                \n                recalls = cumsum_tp / (tp + fn) if (tp + fn) > 0 else np.zeros_like(cumsum_tp)\n                precisions = cumsum_tp / (cumsum_tp + cumsum_fp)\n                \n                ap = self.compute_ap(recalls, precisions)\n                \n                results[f'AP@{iou_thresh}'] = ap\n                results[f'Precision@{iou_thresh}'] = precisions[-1] if len(precisions) > 0 else 0\n                results[f'Recall@{iou_thresh}'] = recalls[-1] if len(recalls) > 0 else 0\n            else:\n                results[f'AP@{iou_thresh}'] = 0\n                results[f'Precision@{iou_thresh}'] = 0\n                results[f'Recall@{iou_thresh}'] = 0\n        \n        # mAP\n        results['mAP'] = np.mean([results[f'AP@{t}'] for t in self.iou_thresholds])\n        \n        return results\n\n\nclass ViolenceDetectionMetrics:\n    \"\"\"\n    Metrics specific to violence detection task.\n    \"\"\"\n    \n    def __init__(self):\n        self.reset()\n    \n    def reset(self):\n        self.predictions = []\n        self.labels = []\n        self.scores = []\n    \n    def update(self, pred_label: int, true_label: int, confidence: float):\n        self.predictions.append(pred_label)\n        self.labels.append(true_label)\n        self.scores.append(confidence)\n    \n    def evaluate(self) -> Dict[str, float]:\n        \"\"\"Compute violence detection metrics.\"\"\"\n        predictions = np.array(self.predictions)\n        labels = np.array(self.labels)\n        scores = np.array(self.scores)\n        \n        # Accuracy\n        accuracy = (predictions == labels).mean()\n        \n        # Precision, Recall, F1 for violence class\n        tp = ((predictions == 1) & (labels == 1)).sum()\n        fp = ((predictions == 1) & (labels == 0)).sum()\n        fn = ((predictions == 0) & (labels == 1)).sum()\n        tn = ((predictions == 0) & (labels == 0)).sum()\n        \n        precision = tp / (tp + fp) if (tp + fp) > 0 else 0\n        recall = tp / (tp + fn) if (tp + fn) > 0 else 0\n        f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0\n        \n        # Specificity\n        specificity = tn / (tn + fp) if (tn + fp) > 0 else 0\n        \n        # AUC-ROC (if scores available)\n        try:\n            from sklearn.metrics import roc_auc_score\n            auc_roc = roc_auc_score(labels, scores)\n        except:\n            auc_roc = 0.0\n        \n        return {\n            'accuracy': accuracy,\n            'precision': precision,\n            'recall': recall,\n            'f1_score': f1,\n            'specificity': specificity,\n            'auc_roc': auc_roc\n        }\n\n\nclass PerformanceMetrics:\n    \"\"\"\n    System performance metrics: FPS, latency, memory usage.\n    \"\"\"\n    \n    def __init__(self):\n        self.reset()\n    \n    def reset(self):\n        self.inference_times = []\n        self.preprocessing_times = []\n        self.postprocessing_times = []\n        self.memory_usage = []\n    \n    def update(self, inference_time: float, preprocessing_time: float = 0,\n               postprocessing_time: float = 0, memory_mb: float = 0):\n        self.inference_times.append(inference_time)\n        self.preprocessing_times.append(preprocessing_time)\n        self.postprocessing_times.append(postprocessing_time)\n        self.memory_usage.append(memory_mb)\n    \n    def evaluate(self) -> Dict[str, float]:\n        \"\"\"Compute performance metrics.\"\"\"\n        inference_times = np.array(self.inference_times)\n        \n        return {\n            'avg_inference_time_ms': np.mean(inference_times) * 1000,\n            'std_inference_time_ms': np.std(inference_times) * 1000,\n            'min_inference_time_ms': np.min(inference_times) * 1000,\n            'max_inference_time_ms': np.max(inference_times) * 1000,\n            'fps': 1.0 / np.mean(inference_times),\n            'avg_memory_mb': np.mean(self.memory_usage) if self.memory_usage else 0,\n            'throughput': len(self.inference_times) / sum(self.inference_times) if sum(self.inference_times) > 0 else 0\n        }\n\n\nclass AblationStudy:\n    \"\"\"\n    Framework for ablation studies.\n    \"\"\"\n    \n    def __init__(self, base_config: Dict):\n        self.base_config = base_config\n        self.results = {}\n    \n    def run_ablation(self, model_builder: Callable, test_loader: DataLoader,\n                     component_name: str, enabled: bool = True) -> Dict:\n        \"\"\"Run ablation for a specific component.\"\"\"\n        config = self.base_config.copy()\n        config[component_name] = enabled\n        \n        model = model_builder(**config)\n        evaluator = ModelEvaluator(model, test_loader)\n        results = evaluator.evaluate()\n        \n        return results\n    \n    def run_full_ablation(self, model_builder: Callable, test_loader: DataLoader,\n                         components: List[str]) -> Dict[str, Dict]:\n        \"\"\"Run full ablation study.\"\"\"\n        print(\"Running ablation study...\")\n        \n        # Baseline: all components enabled\n        print(\"Evaluating baseline (all components)...\")\n        baseline_results = self.run_ablation(model_builder, test_loader, 'baseline', True)\n        self.results['baseline'] = baseline_results\n        \n        # Ablation: disable each component\n        for component in components:\n            print(f\"Evaluating without {component}...\")\n            \n            # Disable this component\n            config = self.base_config.copy()\n            config[component] = False\n            \n            model = model_builder(**config)\n            evaluator = ModelEvaluator(model, test_loader)\n            results = evaluator.evaluate()\n            \n            self.results[f'without_{component}'] = results\n            \n            # Compute impact\n            impact = baseline_results['detection_metrics']['mAP'] - results['detection_metrics']['mAP']\n            print(f\"  Impact of {component}: {impact:.4f} mAP\")\n        \n        return self.results\n    \n    def generate_report(self, output_path: str):\n        \"\"\"Generate ablation study report.\"\"\"\n        report = []\n        report.append(\"=\" * 80)\n        report.append(\"Ablation Study Report\")\n        report.append(\"=\" * 80)\n        report.append(\"\")\n        \n        # Baseline\n        baseline = self.results.get('baseline', {})\n        report.append(\"Baseline (All Components):\")\n        report.append(f\"  mAP: {baseline.get('detection_metrics', {}).get('mAP', 0):.4f}\")\n        report.append(f\"  Violence Accuracy: {baseline.get('violence_metrics', {}).get('accuracy', 0):.4f}\")\n        report.append(\"\")\n        \n        # Ablation results\n        report.append(\"Component Ablation:\")\n        for name, results in self.results.items():\n            if name != 'baseline':\n                component = name.replace('without_', '')\n                mAP = results.get('detection_metrics', {}).get('mAP', 0)\n                baseline_mAP = baseline.get('detection_metrics', {}).get('mAP', 0)\n                impact = baseline_mAP - mAP\n                report.append(f\"  {component}:\")\n                report.append(f\"    mAP: {mAP:.4f} (impact: {impact:+.4f})\")\n        \n        report.append(\"\")\n        report.append(\"=\" * 80)\n        \n        # Save report\n        with open(output_path, 'w') as f:\n            f.write('\\n'.join(report))\n        \n        print(f\"Ablation report saved to {output_path}\")\n\n\nclass ModelEvaluator:\n    \"\"\"\n    Complete model evaluator.\n    \"\"\"\n    \n    def __init__(self, model: nn.Module, test_loader: DataLoader, device: str = 'cuda'):\n        self.model = model\n        self.test_loader = test_loader\n        self.device = torch.device(device if torch.cuda.is_available() else 'cpu')\n        self.model.to(self.device)\n        self.model.eval()\n        \n        # Metrics\n        self.detection_metrics = DetectionMetrics()\n        self.violence_metrics = ViolenceDetectionMetrics()\n        self.performance_metrics = PerformanceMetrics()\n    \n    @torch.no_grad()\n    def evaluate(self) -> Dict:\n        \"\"\"Run complete evaluation.\"\"\"\n        print(\"Running evaluation...\")\n        \n        for batch in tqdm(self.test_loader, desc='Evaluating'):\n            images = batch['image'].to(self.device)\n            gt_boxes = batch['boxes'].cpu().numpy()\n            gt_labels = batch['labels'].cpu().numpy()\n            \n            # Measure inference time\n            torch.cuda.synchronize() if torch.cuda.is_available() else None\n            start_time = time.time()\n            \n            outputs = self.model(images)\n            \n            torch.cuda.synchronize() if torch.cuda.is_available() else None\n            inference_time = time.time() - start_time\n            \n            # Get predictions\n            pred_logits = outputs['pred_logits'].cpu()\n            pred_boxes = outputs['pred_boxes'].cpu()\n            \n            # Process each sample in batch\n            for i in range(len(images)):\n                # Get predictions for this sample\n                scores, labels = pred_logits[i].softmax(-1).max(-1)\n                boxes = pred_boxes[i]\n                \n                # Filter by confidence\n                keep = scores > 0.5\n                boxes = boxes[keep].numpy()\n                scores = scores[keep].numpy()\n                labels = labels[keep].numpy()\n                \n                # Update detection metrics\n                self.detection_metrics.update(boxes, scores, gt_boxes[i], gt_labels[i])\n                \n                # Update violence metrics (if applicable)\n                if len(labels) > 0:\n                    pred_violence = (labels == 1).any()\n                    true_violence = (gt_labels[i] == 1).any()\n                    self.violence_metrics.update(\n                        int(pred_violence), int(true_violence), \n                        scores.max() if len(scores) > 0 else 0\n                    )\n            \n            # Update performance metrics\n            self.performance_metrics.update(inference_time / len(images))\n        \n        # Compute final metrics\n        results = {\n            'detection_metrics': self.detection_metrics.evaluate(),\n            'violence_metrics': self.violence_metrics.evaluate(),\n            'performance_metrics': self.performance_metrics.evaluate()\n        }\n        \n        return results\n    \n    def print_results(self, results: Dict):\n        \"\"\"Print evaluation results.\"\"\"\n        print(\"\\n\" + \"=\" * 80)\n        print(\"Evaluation Results\")\n        print(\"=\" * 80)\n        \n        print(\"\\nDetection Metrics:\")\n        for key, value in results['detection_metrics'].items():\n            print(f\"  {key}: {value:.4f}\")\n        \n        print(\"\\nViolence Detection Metrics:\")\n        for key, value in results['violence_metrics'].items():\n            print(f\"  {key}: {value:.4f}\")\n        \n        print(\"\\nPerformance Metrics:\")\n        for key, value in results['performance_metrics'].items():\n            if 'time' in key:\n                print(f\"  {key}: {value:.2f} ms\")\n            elif 'memory' in key:\n                print(f\"  {key}: {value:.2f} MB\")\n            else:\n                print(f\"  {key}: {value:.2f}\")\n        \n        print(\"=\" * 80)\n\n\ndef main():\n    \"\"\"Main evaluation function.\"\"\"\n    # Load model\n    print(\"Loading SAF-DETR model...\")\n    model = build_saf_detr(\n        num_classes=1,\n        hidden_dim=256,\n        num_queries=300,\n        use_adaptive_intelligence=True,\n        use_feature_enhancement=True,\n        use_temporal_memory=True,\n        use_novel_pipeline=True\n    )\n    \n    # Load checkpoint\n    checkpoint_path = 'checkpoints/saf_detr/best.pth'\n    if Path(checkpoint_path).exists():\n        checkpoint = torch.load(checkpoint_path)\n        model.load_state_dict(checkpoint['model_state_dict'])\n        print(f\"Loaded checkpoint from epoch {checkpoint['epoch']}\")\n    \n    # Create test dataset (placeholder)\n    from torch.utils.data import DataLoader\n    from training.train import SurveillanceDataset\n    \n    test_dataset = SurveillanceDataset(\n        data_root='data/test',\n        annotation_file='data/test/annotations.json',\n        mode='test'\n    )\n    \n    test_loader = DataLoader(\n        test_dataset,\n        batch_size=4,\n        shuffle=False,\n        num_workers=4\n    )\n    \n    # Evaluate\n    evaluator = ModelEvaluator(model, test_loader)\n    results = evaluator.evaluate()\n    evaluator.print_results(results)\n    \n    # Save results\n    output_path = 'evaluation_results.json'\n    with open(output_path, 'w') as f:\n        json.dump(results, f, indent=2)\n    print(f\"\\nResults saved to {output_path}\")\n\n\nif __name__ == \"__main__\":\n    main()\n
+"""
+SAF-DETR Evaluation Framework
+==============================
+
+Comprehensive evaluation with multiple metrics, ablation studies,
+and visualization tools.
+
+Author: SAF-DETR Research Team
+Date: 2026
+"""
+
+import torch
+import torch.nn as nn
+import numpy as np
+from typing import Dict, List, Tuple, Optional
+from pathlib import Path
+import json
+import cv2
+from tqdm import tqdm
+import matplotlib.pyplot as plt
+from collections import defaultdict
+import time
+
+# Import model
+import sys
+sys.path.append(str(Path(__file__).parent.parent))
+from models.SAF_DETR.complete_model import build_saf_detr
+
+
+class DetectionMetrics:
+    """
+    Standard detection metrics: AP, mAP, Precision, Recall.
+    """
+    
+    def __init__(self, iou_thresholds: List[float] = [0.5, 0.75]):
+        self.iou_thresholds = iou_thresholds
+        self.reset()
+    
+    def reset(self):
+        self.predictions = []
+        self.ground_truths = []
+        self.scores = []
+    
+    def update(self, pred_boxes: np.ndarray, pred_scores: np.ndarray, 
+               gt_boxes: np.ndarray, gt_labels: np.ndarray):
+        """Update metrics with new predictions."""
+        self.predictions.append({
+            'boxes': pred_boxes,
+            'scores': pred_scores
+        })
+        self.ground_truths.append({
+            'boxes': gt_boxes,
+            'labels': gt_labels
+        })
+    
+    def compute_iou(self, boxes1: np.ndarray, boxes2: np.ndarray) -> np.ndarray:
+        """Compute IoU between two sets of boxes."""
+        # boxes: [N, 4] (x1, y1, x2, y2)
+        area1 = (boxes1[:, 2] - boxes1[:, 0]) * (boxes1[:, 3] - boxes1[:, 1])
+        area2 = (boxes2[:, 2] - boxes2[:, 0]) * (boxes2[:, 3] - boxes2[:, 1])
+        
+        inter_x1 = np.maximum(boxes1[:, None, 0], boxes2[None, :, 0])
+        inter_y1 = np.maximum(boxes1[:, None, 1], boxes2[None, :, 1])
+        inter_x2 = np.minimum(boxes1[:, None, 2], boxes2[None, :, 2])
+        inter_y2 = np.minimum(boxes1[:, None, 3], boxes2[None, :, 3])
+        
+        inter_area = np.maximum(0, inter_x2 - inter_x1) * np.maximum(0, inter_y2 - inter_y1)
+        union_area = area1[:, None] + area2[None, :] - inter_area
+        
+        iou = inter_area / (union_area + 1e-6)
+        return iou
+    
+    def compute_ap(self, recalls: np.ndarray, precisions: np.ndarray) -> float:
+        """Compute Average Precision using 11-point interpolation."""
+        # Add sentinel values
+        recalls = np.concatenate([[0], recalls, [1]])
+        precisions = np.concatenate([[0], precisions, [0]])
+        
+        # Compute precision envelope
+        for i in range(len(precisions) - 1, 0, -1):
+            precisions[i - 1] = max(precisions[i - 1], precisions[i])
+        
+        # Find points where recall changes
+        indices = np.where(recalls[1:] != recalls[:-1])[0]
+        
+        # Compute AP
+        ap = np.sum((recalls[indices + 1] - recalls[indices]) * precisions[indices + 1])
+        return ap
+    
+    def evaluate(self) -> Dict[str, float]:
+        """Compute all metrics."""
+        results = {}
+        
+        for iou_thresh in self.iou_thresholds:
+            tp = 0
+            fp = 0
+            fn = 0
+            
+            all_scores = []
+            all_matches = []
+            
+            for pred, gt in zip(self.predictions, self.ground_truths):
+                pred_boxes = pred['boxes']
+                pred_scores = pred['scores']
+                gt_boxes = gt['boxes']
+                
+                if len(pred_boxes) == 0:
+                    fn += len(gt_boxes)
+                    continue
+                
+                if len(gt_boxes) == 0:
+                    fp += len(pred_boxes)
+                    continue
+                
+                # Compute IoU
+                iou_matrix = self.compute_iou(pred_boxes, gt_boxes)
+                
+                # Match predictions to ground truth
+                matched_gt = set()
+                for i, score in enumerate(pred_scores):
+                    all_scores.append(score)
+                    
+                    if len(iou_matrix[i]) > 0:
+                        best_iou = iou_matrix[i].max()
+                        best_gt = iou_matrix[i].argmax()
+                        
+                        if best_iou >= iou_thresh and best_gt not in matched_gt:
+                            tp += 1
+                            matched_gt.add(best_gt)
+                            all_matches.append(1)  # True positive
+                        else:
+                            fp += 1
+                            all_matches.append(0)  # False positive
+                    else:
+                        fp += 1
+                        all_matches.append(0)
+                
+                fn += len(gt_boxes) - len(matched_gt)
+            
+            # Compute precision-recall curve
+            if len(all_scores) > 0:
+                sorted_indices = np.argsort(all_scores)[::-1]
+                sorted_matches = np.array(all_matches)[sorted_indices]
+                
+                cumsum_tp = np.cumsum(sorted_matches)
+                cumsum_fp = np.cumsum(1 - sorted_matches)
+                
+                recalls = cumsum_tp / (tp + fn) if (tp + fn) > 0 else np.zeros_like(cumsum_tp)
+                precisions = cumsum_tp / (cumsum_tp + cumsum_fp)
+                
+                ap = self.compute_ap(recalls, precisions)
+                
+                results[f'AP@{iou_thresh}'] = ap
+                results[f'Precision@{iou_thresh}'] = precisions[-1] if len(precisions) > 0 else 0
+                results[f'Recall@{iou_thresh}'] = recalls[-1] if len(recalls) > 0 else 0
+            else:
+                results[f'AP@{iou_thresh}'] = 0
+                results[f'Precision@{iou_thresh}'] = 0
+                results[f'Recall@{iou_thresh}'] = 0
+        
+        # mAP
+        results['mAP'] = np.mean([results[f'AP@{t}'] for t in self.iou_thresholds])
+        
+        return results
+
+
+class ViolenceDetectionMetrics:
+    """
+    Metrics specific to violence detection task.
+    """
+    
+    def __init__(self):
+        self.reset()
+    
+    def reset(self):
+        self.predictions = []
+        self.labels = []
+        self.scores = []
+    
+    def update(self, pred_label: int, true_label: int, confidence: float):
+        self.predictions.append(pred_label)
+        self.labels.append(true_label)
+        self.scores.append(confidence)
+    
+    def evaluate(self) -> Dict[str, float]:
+        """Compute violence detection metrics."""
+        predictions = np.array(self.predictions)
+        labels = np.array(self.labels)
+        scores = np.array(self.scores)
+        
+        # Accuracy
+        accuracy = (predictions == labels).mean()
+        
+        # Precision, Recall, F1 for violence class
+        tp = ((predictions == 1) & (labels == 1)).sum()
+        fp = ((predictions == 1) & (labels == 0)).sum()
+        fn = ((predictions == 0) & (labels == 1)).sum()
+        tn = ((predictions == 0) & (labels == 0)).sum()
+        
+        precision = tp / (tp + fp) if (tp + fp) > 0 else 0
+        recall = tp / (tp + fn) if (tp + fn) > 0 else 0
+        f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0
+        
+        # Specificity
+        specificity = tn / (tn + fp) if (tn + fp) > 0 else 0
+        
+        # AUC-ROC (if scores available)
+        try:
+            from sklearn.metrics import roc_auc_score
+            auc_roc = roc_auc_score(labels, scores)
+        except:
+            auc_roc = 0.0
+        
+        return {
+            'accuracy': accuracy,
+            'precision': precision,
+            'recall': recall,
+            'f1_score': f1,
+            'specificity': specificity,
+            'auc_roc': auc_roc
+        }
+
+
+class PerformanceMetrics:
+    """
+    System performance metrics: FPS, latency, memory usage.
+    """
+    
+    def __init__(self):
+        self.reset()
+    
+    def reset(self):
+        self.inference_times = []
+        self.preprocessing_times = []
+        self.postprocessing_times = []
+        self.memory_usage = []
+    
+    def update(self, inference_time: float, preprocessing_time: float = 0,
+               postprocessing_time: float = 0, memory_mb: float = 0):
+        self.inference_times.append(inference_time)
+        self.preprocessing_times.append(preprocessing_time)
+        self.postprocessing_times.append(postprocessing_time)
+        self.memory_usage.append(memory_mb)
+    
+    def evaluate(self) -> Dict[str, float]:
+        """Compute performance metrics."""
+        inference_times = np.array(self.inference_times)
+        
+        return {
+            'avg_inference_time_ms': np.mean(inference_times) * 1000,
+            'std_inference_time_ms': np.std(inference_times) * 1000,
+            'min_inference_time_ms': np.min(inference_times) * 1000,
+            'max_inference_time_ms': np.max(inference_times) * 1000,
+            'fps': 1.0 / np.mean(inference_times),
+            'avg_memory_mb': np.mean(self.memory_usage) if self.memory_usage else 0,
+            'throughput': len(self.inference_times) / sum(self.inference_times) if sum(self.inference_times) > 0 else 0
+        }
+
+
+class AblationStudy:
+    """
+    Framework for ablation studies.
+    """
+    
+    def __init__(self, base_config: Dict):
+        self.base_config = base_config
+        self.results = {}
+    
+    def run_ablation(self, model_builder: Callable, test_loader: DataLoader,
+                     component_name: str, enabled: bool = True) -> Dict:
+        """Run ablation for a specific component."""
+        config = self.base_config.copy()
+        config[component_name] = enabled
+        
+        model = model_builder(**config)
+        evaluator = ModelEvaluator(model, test_loader)
+        results = evaluator.evaluate()
+        
+        return results
+    
+    def run_full_ablation(self, model_builder: Callable, test_loader: DataLoader,
+                         components: List[str]) -> Dict[str, Dict]:
+        """Run full ablation study."""
+        print("Running ablation study...")
+        
+        # Baseline: all components enabled
+        print("Evaluating baseline (all components)...")
+        baseline_results = self.run_ablation(model_builder, test_loader, 'baseline', True)
+        self.results['baseline'] = baseline_results
+        
+        # Ablation: disable each component
+        for component in components:
+            print(f"Evaluating without {component}...")
+            
+            # Disable this component
+            config = self.base_config.copy()
+            config[component] = False
+            
+            model = model_builder(**config)
+            evaluator = ModelEvaluator(model, test_loader)
+            results = evaluator.evaluate()
+            
+            self.results[f'without_{component}'] = results
+            
+            # Compute impact
+            impact = baseline_results['detection_metrics']['mAP'] - results['detection_metrics']['mAP']
+            print(f"  Impact of {component}: {impact:.4f} mAP")
+        
+        return self.results
+    
+    def generate_report(self, output_path: str):
+        """Generate ablation study report."""
+        report = []
+        report.append("=" * 80)
+        report.append("Ablation Study Report")
+        report.append("=" * 80)
+        report.append("")
+        
+        # Baseline
+        baseline = self.results.get('baseline', {})
+        report.append("Baseline (All Components):")
+        report.append(f"  mAP: {baseline.get('detection_metrics', {}).get('mAP', 0):.4f}")
+        report.append(f"  Violence Accuracy: {baseline.get('violence_metrics', {}).get('accuracy', 0):.4f}")
+        report.append("")
+        
+        # Ablation results
+        report.append("Component Ablation:")
+        for name, results in self.results.items():
+            if name != 'baseline':
+                component = name.replace('without_', '')
+                mAP = results.get('detection_metrics', {}).get('mAP', 0)
+                baseline_mAP = baseline.get('detection_metrics', {}).get('mAP', 0)
+                impact = baseline_mAP - mAP
+                report.append(f"  {component}:")
+                report.append(f"    mAP: {mAP:.4f} (impact: {impact:+.4f})")
+        
+        report.append("")
+        report.append("=" * 80)
+        
+        # Save report
+        with open(output_path, 'w') as f:
+            f.write('\
+'.join(report))
+        
+        print(f"Ablation report saved to {output_path}")
+
+
+class ModelEvaluator:
+    """
+    Complete model evaluator.
+    """
+    
+    def __init__(self, model: nn.Module, test_loader: DataLoader, device: str = 'cuda'):
+        self.model = model
+        self.test_loader = test_loader
+        self.device = torch.device(device if torch.cuda.is_available() else 'cpu')
+        self.model.to(self.device)
+        self.model.eval()
+        
+        # Metrics
+        self.detection_metrics = DetectionMetrics()
+        self.violence_metrics = ViolenceDetectionMetrics()
+        self.performance_metrics = PerformanceMetrics()
+    
+    @torch.no_grad()
+    def evaluate(self) -> Dict:
+        """Run complete evaluation."""
+        print("Running evaluation...")
+        
+        for batch in tqdm(self.test_loader, desc='Evaluating'):
+            images = batch['image'].to(self.device)
+            gt_boxes = batch['boxes'].cpu().numpy()
+            gt_labels = batch['labels'].cpu().numpy()
+            
+            # Measure inference time
+            torch.cuda.synchronize() if torch.cuda.is_available() else None
+            start_time = time.time()
+            
+            outputs = self.model(images)
+            
+            torch.cuda.synchronize() if torch.cuda.is_available() else None
+            inference_time = time.time() - start_time
+            
+            # Get predictions
+            pred_logits = outputs['pred_logits'].cpu()
+            pred_boxes = outputs['pred_boxes'].cpu()
+            
+            # Process each sample in batch
+            for i in range(len(images)):
+                # Get predictions for this sample
+                scores, labels = pred_logits[i].softmax(-1).max(-1)
+                boxes = pred_boxes[i]
+                
+                # Filter by confidence
+                keep = scores > 0.5
+                boxes = boxes[keep].numpy()
+                scores = scores[keep].numpy()
+                labels = labels[keep].numpy()
+                
+                # Update detection metrics
+                self.detection_metrics.update(boxes, scores, gt_boxes[i], gt_labels[i])
+                
+                # Update violence metrics (if applicable)
+                if len(labels) > 0:
+                    pred_violence = (labels == 1).any()
+                    true_violence = (gt_labels[i] == 1).any()
+                    self.violence_metrics.update(
+                        int(pred_violence), int(true_violence), 
+                        scores.max() if len(scores) > 0 else 0
+                    )
+            
+            # Update performance metrics
+            self.performance_metrics.update(inference_time / len(images))
+        
+        # Compute final metrics
+        results = {
+            'detection_metrics': self.detection_metrics.evaluate(),
+            'violence_metrics': self.violence_metrics.evaluate(),
+            'performance_metrics': self.performance_metrics.evaluate()
+        }
+        
+        return results
+    
+    def print_results(self, results: Dict):
+        """Print evaluation results."""
+        print("\
+" + "=" * 80)
+        print("Evaluation Results")
+        print("=" * 80)
+        
+        print("\
+Detection Metrics:")
+        for key, value in results['detection_metrics'].items():
+            print(f"  {key}: {value:.4f}")
+        
+        print("\
+Violence Detection Metrics:")
+        for key, value in results['violence_metrics'].items():
+            print(f"  {key}: {value:.4f}")
+        
+        print("\
+Performance Metrics:")
+        for key, value in results['performance_metrics'].items():
+            if 'time' in key:
+                print(f"  {key}: {value:.2f} ms")
+            elif 'memory' in key:
+                print(f"  {key}: {value:.2f} MB")
+            else:
+                print(f"  {key}: {value:.2f}")
+        
+        print("=" * 80)
+
+
+def main():
+    """Main evaluation function."""
+    # Load model
+    print("Loading SAF-DETR model...")
+    model = build_saf_detr(
+        num_classes=1,
+        hidden_dim=256,
+        num_queries=300,
+        use_adaptive_intelligence=True,
+        use_feature_enhancement=True,
+        use_temporal_memory=True,
+        use_novel_pipeline=True
+    )
+    
+    # Load checkpoint
+    checkpoint_path = 'checkpoints/saf_detr/best.pth'
+    if Path(checkpoint_path).exists():
+        checkpoint = torch.load(checkpoint_path)
+        model.load_state_dict(checkpoint['model_state_dict'])
+        print(f"Loaded checkpoint from epoch {checkpoint['epoch']}")
+    
+    # Create test dataset (placeholder)
+    from torch.utils.data import DataLoader
+    from training.train import SurveillanceDataset
+    
+    test_dataset = SurveillanceDataset(
+        data_root='data/test',
+        annotation_file='data/test/annotations.json',
+        mode='test'
+    )
+    
+    test_loader = DataLoader(
+        test_dataset,
+        batch_size=4,
+        shuffle=False,
+        num_workers=4
+    )
+    
+    # Evaluate
+    evaluator = ModelEvaluator(model, test_loader)
+    results = evaluator.evaluate()
+    evaluator.print_results(results)
+    
+    # Save results
+    output_path = 'evaluation_results.json'
+    with open(output_path, 'w') as f:
+        json.dump(results, f, indent=2)
+    print(f"\
+Results saved to {output_path}")
+
+
+if __name__ == "__main__":
+    main()
