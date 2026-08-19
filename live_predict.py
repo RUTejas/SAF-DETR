@@ -25,6 +25,7 @@ import os
 import time
 import argparse
 from pathlib import Path
+from typing import Optional, List, Dict, Tuple, Union, Any
 import numpy as np
 import cv2
 import torch
@@ -238,29 +239,35 @@ class LiveViolenceDetector:
                 pred_boxes = outputs['pred_boxes'][0]    # [num_queries, 4]
 
                 scores, labels = pred_logits.softmax(-1)[:, 0], pred_logits.argmax(-1)
-                keep = scores > self.conf_thresh
+                keep = (scores > self.conf_thresh) & (labels == 0)
 
                 if keep.sum() > 0:
-                    boxes = pred_boxes[keep].cpu().numpy()
-                    scores = scores[keep].cpu().numpy()
-                    
-                    for b, s in zip(boxes, scores):
-                        # Convert [cx, cy, w, h] to [x1, y1, x2, y2]
-                        cx, cy, bw, bh = b
-                        x1 = int((cx - bw / 2) * self.img_size / scale)
-                        y1 = int((cy - bh / 2) * self.img_size / scale)
-                        x2 = int((cx + bw / 2) * self.img_size / scale)
-                        y2 = int((cy + bh / 2) * self.img_size / scale)
-                        
-                        x1 = max(0, min(orig_w, x1))
-                        y1 = max(0, min(orig_h, y1))
-                        x2 = max(0, min(orig_w, x2))
-                        y2 = max(0, min(orig_h, y2))
+                    boxes = pred_boxes[keep]
+                    scores_keep = scores[keep]
+
+                    # Convert [cx, cy, w, h] to xyxy normalized
+                    cx, cy, bw, bh = boxes[:, 0], boxes[:, 1], boxes[:, 2], boxes[:, 3]
+                    x1_t = (cx - bw / 2) * self.img_size / scale
+                    y1_t = (cy - bh / 2) * self.img_size / scale
+                    x2_t = (cx + bw / 2) * self.img_size / scale
+                    y2_t = (cy + bh / 2) * self.img_size / scale
+                    boxes_xyxy = torch.stack([x1_t, y1_t, x2_t, y2_t], dim=-1)
+
+                    # Apply Non-Maximum Suppression (NMS) to eliminate duplicate query boxes
+                    import torchvision.ops as ops
+                    nms_keep = ops.nms(boxes_xyxy, scores_keep, iou_threshold=0.45)[:10]
+
+                    for idx in nms_keep:
+                        x1 = int(max(0, min(orig_w, boxes_xyxy[idx, 0].item())))
+                        y1 = int(max(0, min(orig_h, boxes_xyxy[idx, 1].item())))
+                        x2 = int(max(0, min(orig_w, boxes_xyxy[idx, 2].item())))
+                        y2 = int(max(0, min(orig_h, boxes_xyxy[idx, 3].item())))
+                        s = float(scores_keep[idx].item())
 
                         beh = 'Fighting' if (motion_energy > 3.5 or s > 0.85) else ('Suspicious' if motion_energy > 1.8 else 'Normal')
                         detections.append({
                             'box': [x1, y1, x2, y2],
-                            'conf': float(s),
+                            'conf': s,
                             'behavior': beh
                         })
 
@@ -561,6 +568,27 @@ class LiveViolenceDetector:
             key = cv2.waitKey(30) & 0xFF
             if key == ord('q') or key == 27:
                 break
+            elif key == ord('s'):
+                fname = f"saf_detr_capture_{int(time.time())}.jpg"
+                cv2.imwrite(fname, hud)
+                print(f"[✓] Saved screenshot: {fname}")
+            elif key == ord('o'):
+                self.show_overlays = not self.show_overlays
+                print(f"[*] HUD Overlays: {'ON' if self.show_overlays else 'OFF'}")
+            elif key == ord('e'):
+                self.enable_enhancement = not self.enable_enhancement
+                print(f"[*] Low-Light Enhancement: {'ON' if self.enable_enhancement else 'OFF'}")
+            elif key == ord('k'):
+                self.show_skeleton = not self.show_skeleton
+                print(f"[*] Pose Skeleton: {'ON' if self.show_skeleton else 'OFF'}")
+            elif key in [ord('+'), ord('=')]:
+                self.conf_thresh = min(0.95, self.conf_thresh + 0.05)
+                print(f"[*] Confidence Threshold: {self.conf_thresh:.2f}")
+            elif key in [ord('-'), ord('_')]:
+                self.conf_thresh = max(0.10, self.conf_thresh - 0.05)
+                print(f"[*] Confidence Threshold: {self.conf_thresh:.2f}")
+            elif key == 32:
+                self.paused = not self.paused
 
         cv2.destroyAllWindows()
 
